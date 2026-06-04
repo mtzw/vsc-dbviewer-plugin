@@ -46,6 +46,11 @@ public final class JdbcHelperH2Test {
     assertContains(data, "\"Alice\"");
     assertContains(data, "\"columnTypes\":[");
     assertContains(data, "\"jdbcType\":4");
+    String filtered = call("getObjectData", jdbcUrl, "{\"schema\":null,\"name\":\"PERSON\",\"type\":\"TABLE\"}", 100, 0, ",\"where\":\"NAME = 'Alice'\"");
+    assertContains(filtered, "\"Alice\"");
+    assertNotContains(filtered, "\"Bob\"");
+    String sorted = call("getObjectData", jdbcUrl, "{\"schema\":null,\"name\":\"PERSON\",\"type\":\"TABLE\"}", 100, 0, ",\"sortColumn\":\"NAME\",\"sortDirection\":\"DESC\"");
+    assertContains(sorted, "\"rows\":[[3,1,\"Carol\"");
     String paged = call("getObjectData", jdbcUrl, "{\"schema\":null,\"name\":\"PERSON\",\"type\":\"TABLE\"}", 1, 1);
     assertContains(paged, "\"offset\":1");
     assertContains(paged, "\"hasPrevious\":true");
@@ -60,6 +65,10 @@ public final class JdbcHelperH2Test {
   }
 
   private static String call(String action, String jdbcUrl, String objectJson, int limit, int offset) throws Exception {
+    return call(action, jdbcUrl, objectJson, limit, offset, "");
+  }
+
+  private static String call(String action, String jdbcUrl, String objectJson, int limit, int offset, String extraJson) throws Exception {
     String request = "{"
       + "\"action\":\"" + action + "\","
       + "\"connection\":{"
@@ -68,7 +77,7 @@ public final class JdbcHelperH2Test {
       + "\"username\":\"sa\","
       + "\"password\":\"\""
       + "}"
-      + (objectJson == null ? "" : ",\"object\":" + objectJson + ",\"limit\":" + limit + ",\"offset\":" + offset)
+      + (objectJson == null ? "" : ",\"object\":" + objectJson + ",\"limit\":" + limit + ",\"offset\":" + offset + extraJson)
       + "}";
 
     ByteArrayInputStream input = new ByteArrayInputStream(request.getBytes(StandardCharsets.UTF_8));
@@ -91,6 +100,12 @@ public final class JdbcHelperH2Test {
   private static void assertContains(String value, String expected) {
     if (!value.contains(expected)) {
       throw new AssertionError("Expected response to contain " + expected + " but was: " + value);
+    }
+  }
+
+  private static void assertNotContains(String value, String unexpected) {
+    if (value.contains(unexpected)) {
+      throw new AssertionError("Expected response not to contain " + unexpected + " but was: " + value);
     }
   }
 }

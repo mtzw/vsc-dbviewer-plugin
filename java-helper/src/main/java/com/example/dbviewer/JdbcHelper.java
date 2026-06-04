@@ -56,7 +56,15 @@ public final class JdbcHelper {
         case "listSchemas" -> listSchemas(connection);
         case "listTablesAndViews" -> listTablesAndViews(connection, objectSchema(request), objectType(request));
         case "getObjectInfo" -> getObjectInfo(connection, object(request));
-        case "getObjectData" -> getObjectData(connection, object(request), intValue(request.get("limit"), 100), intValue(request.get("offset"), 0));
+        case "getObjectData" -> getObjectData(
+          connection,
+          object(request),
+          intValue(request.get("limit"), 100),
+          intValue(request.get("offset"), 0),
+          nullableString(request.get("where")),
+          nullableString(request.get("sortColumn")),
+          nullableString(request.get("sortDirection"))
+        );
         case "getObjectDdl" -> getObjectDdl(connection, object(request));
         default -> throw new IllegalArgumentException("Unknown action: " + action);
       };
@@ -269,19 +277,43 @@ public final class JdbcHelper {
     };
   }
 
-  private static Map<String, Object> getObjectData(Connection connection, DbObject object, int limit, int offset) throws SQLException {
+  private static Map<String, Object> getObjectData(
+    Connection connection,
+    DbObject object,
+    int limit,
+    int offset,
+    String where,
+    String sortColumn,
+    String sortDirection
+  ) throws SQLException {
     int safeLimit = Math.max(1, Math.min(limit, 1000));
     int safeOffset = Math.max(0, offset);
-    String sql = "select * from " + qualifiedName(connection, object) + " offset " + safeOffset + " rows fetch next " + (safeLimit + 1) + " rows only";
+    String baseSql = dataSql(connection, object, where, sortColumn, sortDirection);
+    String sql = baseSql + " offset " + safeOffset + " rows fetch next " + (safeLimit + 1) + " rows only";
     try (Statement statement = connection.createStatement()) {
       try {
         return readRows(statement, sql, safeLimit, safeOffset, 0);
       } catch (SQLException firstError) {
-        String fallbackSql = "select * from " + qualifiedName(connection, object);
         statement.setMaxRows(safeLimit + safeOffset + 1);
-        return readRows(statement, fallbackSql, safeLimit, safeOffset, safeOffset);
+        return readRows(statement, baseSql, safeLimit, safeOffset, safeOffset);
       }
     }
+  }
+
+  private static String dataSql(Connection connection, DbObject object, String where, String sortColumn, String sortDirection) throws SQLException {
+    StringBuilder sql = new StringBuilder("select * from ").append(qualifiedName(connection, object));
+    if (where != null && !where.isBlank()) {
+      String condition = where.trim();
+      if (condition.contains(";")) {
+        throw new SQLException("Search condition must not contain semicolons.");
+      }
+      sql.append(" where ").append(condition);
+    }
+    if (sortColumn != null && !sortColumn.isBlank()) {
+      sql.append(" order by ").append(quote(connection, sortColumn.trim()));
+      sql.append("DESC".equalsIgnoreCase(sortDirection) ? " DESC" : " ASC");
+    }
+    return sql.toString();
   }
 
   private static Map<String, Object> readRows(Statement statement, String sql, int limit, int offset, int rowsToSkip) throws SQLException {

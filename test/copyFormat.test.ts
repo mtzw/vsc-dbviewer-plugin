@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { toInsertSql, toTsv } from "../src/copyFormat";
+import { toExportCsv, toExportTsv, toInsertSql, toTsv } from "../src/copyFormat";
 import { DbObject, ObjectData } from "../src/types";
 
 const object: DbObject = {
@@ -32,6 +32,35 @@ test("formats selected rows as TSV", () => {
   assert.equal(
     toTsv(data, [0, 1]),
     "1\tAlice\ttrue\t2026-06-03 10:20:30\t\n2\tBob's row\tfalse\t2026-06-04\tline1 line2"
+  );
+});
+
+test("formats export TSV with header", () => {
+  assert.equal(
+    toExportTsv(data, [0, 1], true),
+    "ID\tNAME\tACTIVE\tCREATED_AT\tNOTE\n1\tAlice\ttrue\t2026-06-03 10:20:30\t\n2\tBob's row\tfalse\t2026-06-04\tline1 line2"
+  );
+});
+
+test("formats export CSV with header and escaped cells", () => {
+  const csvData: ObjectData = {
+    ...data,
+    columns: ["ID", "NAME", "NOTE"],
+    columnTypes: [
+      { name: "ID", typeName: "INTEGER", jdbcType: 4 },
+      { name: "NAME", typeName: "VARCHAR", jdbcType: 12 },
+      { name: "NOTE", typeName: "VARCHAR", jdbcType: 12 }
+    ],
+    rows: [
+      [1, "Alice", "plain"],
+      [2, "Bob, Jr.", "line1\nline2"],
+      [3, "Carol \"CJ\"", null]
+    ]
+  };
+
+  assert.equal(
+    toExportCsv(csvData, [0, 1, 2], true),
+    "ID,NAME,NOTE\n1,Alice,plain\n2,\"Bob, Jr.\",\"line1\nline2\"\n3,\"Carol \"\"CJ\"\"\","
   );
 });
 

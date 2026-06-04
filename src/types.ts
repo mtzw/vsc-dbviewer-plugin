@@ -124,6 +124,9 @@ export interface HelperRequest {
   object?: DbObject;
   limit?: number;
   offset?: number;
+  where?: string;
+  sortColumn?: string;
+  sortDirection?: "ASC" | "DESC";
 }
 
 export interface HelperResponse<T> {

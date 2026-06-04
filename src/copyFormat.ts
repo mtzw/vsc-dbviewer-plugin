@@ -6,6 +6,16 @@ export function toTsv(data: ObjectData, rowIndexes: number[]): string {
     .join("\n");
 }
 
+export function toExportTsv(data: ObjectData, rowIndexes: number[], includeHeader: boolean): string {
+  const rows = rowIndexes.map((rowIndex) => data.rows[rowIndex].map(formatTsvCell).join("\t"));
+  return includeHeader ? [data.columns.map(formatTsvCell).join("\t"), ...rows].join("\n") : rows.join("\n");
+}
+
+export function toExportCsv(data: ObjectData, rowIndexes: number[], includeHeader: boolean): string {
+  const rows = rowIndexes.map((rowIndex) => data.rows[rowIndex].map(formatCsvCell).join(","));
+  return includeHeader ? [data.columns.map(formatCsvCell).join(","), ...rows].join("\n") : rows.join("\n");
+}
+
 export function toInsertSql(
   data: ObjectData,
   object: DbObject,
@@ -36,6 +46,14 @@ function formatTsvCell(value: string | number | boolean | null): string {
     return "";
   }
   return String(value).replace(/\r?\n/g, " ");
+}
+
+function formatCsvCell(value: string | number | boolean | null): string {
+  if (value === null) {
+    return "";
+  }
+  const text = String(value);
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, "\"\"")}"` : text;
 }
 
 function toSqlLiteral(value: string | number | boolean | null, column: DataColumnInfo | undefined, dbType: DatabaseType): string {

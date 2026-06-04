@@ -2,7 +2,7 @@
   "name": "vsc-dbviewer-plugin",
   "displayName": "DB Viewer",
   "description": "Read-only JDBC database viewer for VS Code and compatible editors.",
-  "version": "0.2.2",
+  "version": "0.2.4",
   "publisher": "local",
   "engines": {
     "vscode": "^1.90.0"

@@ -43,11 +43,24 @@ v1 では、SQL / TSV コピー、TSV 貼り付け Insert、Java Entity / Record
 - 主キー、外部キー、Unique、IndexなどのJDBCメタデータ表示を強化しました。
 - `INSERT SQLコピー` でOracleのDATE / TIMESTAMP / TIMESTAMP WITH TIME ZONE向けリテラル生成に対応しました。
 
+## v2.3 の改善点
+
+- データタブからTable / View全体をCSV / TSV / InsertSQL形式で保存できます。
+- エクスポートはページ単位でデータを取得し、VS Codeの進捗通知とキャンセルに対応します。
+- CSV / TSVはヘッダ行付きで保存します。
+
+## v2.4 の改善点
+
+- データタブ上部の操作UIをグループ化し、コピー系と保存系の操作を整理しました。
+- 選択した行をハイライト表示します。
+- データリロード、where条件相当の簡易検索、ヘッダクリックによるソートに対応しました。
+- 検索条件とソート条件は、追加ロードとCSV / TSV / InsertSQL保存にも適用されます。
+
 ## ロードマップ
 
-- v2.3: テーブルデータの一括エクスポート機能を追加し、CSV / TSV / InsertSQL形式での保存に対応予定です。
 - v3.0: TSV形式のレコードをペーストしてInsertできるようにします。書き込み前の確認、トランザクション、失敗時の扱いを設計します。
-- v3.1以降: Java Entity / Record生成機能を追加し、型マッピング、命名規則、package、JPA / Jakarta対応などを設定可能にします。
+- v3.1: データタブで行Updateできるようにし、コミット、ロールバックに対応予定です。
+- v3.2以降: Java Entity / Record生成機能を追加し、型マッピング、命名規則、package、JPA / Jakarta対応などを設定可能にします。
 
 ## 開発手順
 
@@ -99,7 +112,7 @@ npx @vscode/vsce package
 作成に成功すると、プロジェクト直下に次のようなファイルが生成されます。
 
 ```text
-vsc-dbviewer-plugin-0.2.2.vsix
+vsc-dbviewer-plugin-0.2.4.vsix
 ```
 
 バージョン番号は `package.json` の `version` に従います。配布前にバージョンを上げる場合は、`package.json` を更新してから `npm install --package-lock-only` を実行し、`package-lock.json` も同期してください。
@@ -111,7 +124,7 @@ vsc-dbviewer-plugin-0.2.2.vsix
 コマンドラインからインストールする場合:
 
 ```sh
-code --install-extension vsc-dbviewer-plugin-0.2.2.vsix
+code --install-extension vsc-dbviewer-plugin-0.2.4.vsix
 ```
 
 VS Code の画面からインストールする場合:
@@ -192,10 +205,16 @@ H2 の入力例:
 
 データタブでは、行チェックボックスを選択して以下の操作ができます。
 
+- `Reload`
+- where条件相当の検索
+- ヘッダクリックによるソート
 - `全選択`
 - `選択解除`
 - `TSVコピー`
 - `INSERT SQLコピー`
+- `CSV保存`
+- `TSV保存`
+- `INSERT SQL保存`
 - 末尾付近までスクロールした際の追加ロード
 
 ## 注意事項
@@ -208,4 +227,7 @@ H2 の入力例:
 - DB ごとの厳密な DDL 取得は v1 ではベストエフォートです。
 - `INSERT SQLコピー` はクリップボードへ文字列をコピーするだけです。DBへの書き込みは行いません。
 - `INSERT SQLコピー` の日付/時刻リテラルのRDB方言対応はベストエフォートです。OracleのDATE/TIMESTAMP向けリテラル生成はJDBC型情報に基づいて行います。
+- `INSERT SQL保存` はSQL文字列をファイルへ保存するだけです。Viewを対象にした場合、そのSQLがDBで実行可能であることは保証しません。
+- データタブの検索条件はSQLのwhere句相当の条件式として扱います。セミコロンを含む条件式は指定できません。
+- 大量データのエクスポートは時間がかかる場合があります。キャンセルした場合、途中まで出力されたファイルが残ります。
 - DB側でTable / Viewを追加、削除した場合は、DB ViewerのRefreshを実行してツリーを更新してください。

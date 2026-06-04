@@ -1,8 +1,20 @@
 import * as vscode from "vscode";
-import { toInsertSql, toTsv } from "./copyFormat";
+import * as fs from "node:fs";
+import { toExportCsv, toExportTsv, toInsertSql, toTsv } from "./copyFormat";
 import { JdbcClient } from "./jdbcClient";
 import { ProfileStore } from "./profileStore";
 import { DbObject, ObjectData, ObjectDdl, ObjectInfo, ConnectionProfile } from "./types";
+
+type ExportFormat = "csv" | "tsv" | "insert";
+type SortDirection = "ASC" | "DESC";
+interface DataQuery {
+  where: string;
+  sortColumn: string | null;
+  sortDirection: SortDirection;
+}
+
+const EXPORT_PAGE_SIZE = 1000;
+const DATA_PAGE_SIZE = 100;
 
 export class ObjectPanel {
   static async open(
@@ -29,9 +41,10 @@ export class ObjectPanel {
         client.request<ObjectInfo>(profile, password, "getObjectInfo", { object }),
         client.request<ObjectDdl>(profile, password, "getObjectDdl", { object })
       ]);
-      const firstPage = await client.request<ObjectData>(profile, password, "getObjectData", { object, limit: 100, offset: 0 });
+      let query: DataQuery = { where: "", sortColumn: null, sortDirection: "ASC" };
+      const firstPage = await loadObjectData(client, profile, password, object, query, 0, DATA_PAGE_SIZE);
       let currentData = firstPage;
-      panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "info");
+      panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "info", query);
 
       panel.webview.onDidReceiveMessage(async (message: WebviewMessage) => {
         try {
@@ -39,18 +52,38 @@ export class ObjectPanel {
             if (!currentData.hasNext) {
               return;
             }
-            const nextPage = await client.request<ObjectData>(profile, password, "getObjectData", {
-              object,
-              limit: currentData.limit,
-              offset: currentData.offset + currentData.rows.length
-            });
+            const nextPage = await loadObjectData(client, profile, password, object, query, currentData.offset + currentData.rows.length, currentData.limit);
             currentData = {
               ...nextPage,
               rows: [...currentData.rows, ...nextPage.rows],
               offset: 0,
               hasPrevious: false
             };
-            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data");
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query);
+            return;
+          }
+
+          if (message.type === "reload") {
+            currentData = await loadObjectData(client, profile, password, object, query, 0, currentData.limit);
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query);
+            return;
+          }
+
+          if (message.type === "search") {
+            query = { ...query, where: message.where.trim() };
+            currentData = await loadObjectData(client, profile, password, object, query, 0, currentData.limit);
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query);
+            return;
+          }
+
+          if (message.type === "sort") {
+            query = {
+              ...query,
+              sortColumn: message.column,
+              sortDirection: query.sortColumn === message.column && query.sortDirection === "ASC" ? "DESC" : "ASC"
+            };
+            currentData = await loadObjectData(client, profile, password, object, query, 0, currentData.limit);
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query);
             return;
           }
 
@@ -65,6 +98,11 @@ export class ObjectPanel {
               : toInsertSql(currentData, object, info.identifierQuoteString, rowIndexes, profile.dbType);
             await vscode.env.clipboard.writeText(text);
             vscode.window.showInformationMessage(`${rowIndexes.length} row(s) copied as ${message.format === "tsv" ? "TSV" : "INSERT SQL"}.`);
+            return;
+          }
+
+          if (message.type === "export") {
+            await exportObject(client, profile, password, object, info, message.format, query);
           }
         } catch (error) {
           vscode.window.showErrorMessage((error as Error).message);
@@ -78,7 +116,145 @@ export class ObjectPanel {
 
 type WebviewMessage =
   | { type: "loadMore" }
-  | { type: "copy"; format: "tsv" | "insert"; rowIndexes: number[] };
+  | { type: "reload" }
+  | { type: "search"; where: string }
+  | { type: "sort"; column: string }
+  | { type: "copy"; format: "tsv" | "insert"; rowIndexes: number[] }
+  | { type: "export"; format: ExportFormat };
+
+async function loadObjectData(
+  client: JdbcClient,
+  profile: ConnectionProfile,
+  password: string,
+  object: DbObject,
+  query: DataQuery,
+  offset: number,
+  limit: number
+): Promise<ObjectData> {
+  return client.request<ObjectData>(profile, password, "getObjectData", {
+    object,
+    limit,
+    offset,
+    where: query.where || undefined,
+    sortColumn: query.sortColumn ?? undefined,
+    sortDirection: query.sortColumn ? query.sortDirection : undefined
+  });
+}
+
+async function exportObject(
+  client: JdbcClient,
+  profile: ConnectionProfile,
+  password: string,
+  object: DbObject,
+  info: ObjectInfo,
+  format: ExportFormat,
+  query: DataQuery
+): Promise<void> {
+  const target = await vscode.window.showSaveDialog({
+    defaultUri: defaultExportUri(object, format),
+    filters: exportFilters(format),
+    saveLabel: "Export"
+  });
+  if (!target) {
+    return;
+  }
+  if (target.scheme !== "file") {
+    throw new Error("ローカルファイルとして保存できる場所を選択してください。");
+  }
+
+  await vscode.window.withProgress(
+    {
+      location: vscode.ProgressLocation.Notification,
+      title: `Exporting ${object.name}`,
+      cancellable: true
+    },
+    async (progress, token) => {
+      const writer = fs.createWriteStream(target.fsPath, { encoding: "utf8" });
+      let offset = 0;
+      let total = 0;
+      let firstChunk = true;
+      try {
+        while (!token.isCancellationRequested) {
+          const page = await loadObjectData(client, profile, password, object, query, offset, EXPORT_PAGE_SIZE);
+          const rowIndexes = page.rows.map((_, rowIndex) => rowIndex);
+          const chunk = formatExportChunk(page, object, info, format, rowIndexes, firstChunk, profile);
+          if (chunk) {
+            if (!firstChunk) {
+              writer.write("\n");
+            }
+            writer.write(chunk);
+          }
+          total += page.rows.length;
+          progress.report({ message: `${total} rows exported` });
+          firstChunk = false;
+          if (!page.hasNext || page.rows.length === 0) {
+            break;
+          }
+          offset += page.rows.length;
+        }
+      } finally {
+        await closeWriter(writer);
+      }
+
+      if (token.isCancellationRequested) {
+        vscode.window.showWarningMessage(`Export cancelled. Partial file remains: ${target.fsPath}`);
+        return;
+      }
+      vscode.window.showInformationMessage(`${total} row(s) exported to ${target.fsPath}.`);
+    }
+  );
+}
+
+function formatExportChunk(
+  data: ObjectData,
+  object: DbObject,
+  info: ObjectInfo,
+  format: ExportFormat,
+  rowIndexes: number[],
+  includeHeader: boolean,
+  profile: ConnectionProfile
+): string {
+  if (format === "csv") {
+    return toExportCsv(data, rowIndexes, includeHeader);
+  }
+  if (format === "tsv") {
+    return toExportTsv(data, rowIndexes, includeHeader);
+  }
+  return toInsertSql(data, object, info.identifierQuoteString, rowIndexes, profile.dbType);
+}
+
+function defaultExportFileName(object: DbObject, format: ExportFormat): string {
+  const extension = format === "insert" ? "sql" : format;
+  const schema = object.schema ? `${sanitizeFileName(object.schema)}.` : "";
+  return `${schema}${sanitizeFileName(object.name)}.${extension}`;
+}
+
+function defaultExportUri(object: DbObject, format: ExportFormat): vscode.Uri | undefined {
+  const fileName = defaultExportFileName(object, format);
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+  return workspaceFolder ? vscode.Uri.joinPath(workspaceFolder.uri, fileName) : undefined;
+}
+
+function sanitizeFileName(value: string): string {
+  return value.replace(/[\\/:*?"<>|]/g, "_");
+}
+
+function exportFilters(format: ExportFormat): Record<string, string[]> {
+  if (format === "csv") {
+    return { CSV: ["csv"] };
+  }
+  if (format === "tsv") {
+    return { TSV: ["tsv", "txt"] };
+  }
+  return { SQL: ["sql"] };
+}
+
+function closeWriter(writer: fs.WriteStream): Promise<void> {
+  return new Promise((resolve, reject) => {
+    writer.once("error", reject);
+    writer.end(resolve);
+  });
+}
 
 function renderLoading(profile: ConnectionProfile, object: DbObject): string {
   return shell(profile, object, "<p class=\"muted\">Loading...</p>");
@@ -96,7 +272,8 @@ function renderObject(
   info: ObjectInfo,
   data: ObjectData,
   ddl: ObjectDdl,
-  activeTab: "info" | "constraints" | "indexes" | "data" | "ddl"
+  activeTab: "info" | "constraints" | "indexes" | "data" | "ddl",
+  query: DataQuery
 ): string {
   const nonce = createNonce();
   const content = `
@@ -121,7 +298,7 @@ function renderObject(
     </section>
     <section id="data" class="panel ${activeTab === "data" ? "active" : ""}">
       <h2>Data <span class="muted">${data.rows.length} loaded</span></h2>
-      ${renderData(data)}
+      ${renderData(data, query)}
     </section>
     <section id="ddl" class="panel ${activeTab === "ddl" ? "active" : ""}">
       <h2>Definition SQL</h2>
@@ -133,13 +310,21 @@ function renderObject(
         const panels = Array.from(document.querySelectorAll(".panel"));
         const vscode = acquireVsCodeApi();
         const selectedCount = document.querySelector("#selected-count");
+        const whereInput = document.querySelector("#where-input");
+        const reloadData = document.querySelector("#reload-data");
+        const applySearch = document.querySelector("#apply-search");
+        const clearSearch = document.querySelector("#clear-search");
         const copyTsv = document.querySelector("#copy-tsv");
         const copyInsert = document.querySelector("#copy-insert");
+        const exportCsv = document.querySelector("#export-csv");
+        const exportTsv = document.querySelector("#export-tsv");
+        const exportInsert = document.querySelector("#export-insert");
         const selectAll = document.querySelector("#select-all");
         const clearSelection = document.querySelector("#clear-selection");
         const loadStatus = document.querySelector("#load-status");
         const dataPanel = document.querySelector("#data");
         const rowChecks = Array.from(document.querySelectorAll(".row-check"));
+        const rows = Array.from(document.querySelectorAll("tbody tr[data-row-index]"));
         let loadingMore = false;
         const hasNext = ${data.hasNext ? "true" : "false"};
 
@@ -152,6 +337,10 @@ function renderObject(
           selectedCount.textContent = String(count);
           copyTsv.disabled = count === 0;
           copyInsert.disabled = count === 0;
+          for (const row of rows) {
+            const check = row.querySelector(".row-check");
+            row.classList.toggle("selected-row", Boolean(check && check.checked));
+          }
         };
 
         for (const tab of tabs) {
@@ -183,6 +372,23 @@ function renderObject(
         });
         copyTsv.addEventListener("click", () => vscode.postMessage({ type: "copy", format: "tsv", rowIndexes: selectedRows() }));
         copyInsert.addEventListener("click", () => vscode.postMessage({ type: "copy", format: "insert", rowIndexes: selectedRows() }));
+        exportCsv.addEventListener("click", () => vscode.postMessage({ type: "export", format: "csv" }));
+        exportTsv.addEventListener("click", () => vscode.postMessage({ type: "export", format: "tsv" }));
+        exportInsert.addEventListener("click", () => vscode.postMessage({ type: "export", format: "insert" }));
+        reloadData.addEventListener("click", () => vscode.postMessage({ type: "reload" }));
+        applySearch.addEventListener("click", () => vscode.postMessage({ type: "search", where: whereInput.value }));
+        clearSearch.addEventListener("click", () => {
+          whereInput.value = "";
+          vscode.postMessage({ type: "search", where: "" });
+        });
+        whereInput.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") {
+            vscode.postMessage({ type: "search", where: whereInput.value });
+          }
+        });
+        for (const sortButton of Array.from(document.querySelectorAll(".sort-column"))) {
+          sortButton.addEventListener("click", () => vscode.postMessage({ type: "sort", column: sortButton.dataset.column }));
+        }
         window.addEventListener("scroll", () => {
           if (!dataPanel.classList.contains("active") || loadingMore || !hasNext) {
             return;
@@ -265,10 +471,14 @@ function renderIndexes(info: ObjectInfo): string {
   `;
 }
 
-function renderData(data: ObjectData): string {
-  const headers = data.columns.map((column) => `<th>${escapeHtml(column)}</th>`).join("");
+function renderData(data: ObjectData, query: DataQuery): string {
+  const headers = data.columns.map((column) => {
+    const active = query.sortColumn === column;
+    const marker = active ? (query.sortDirection === "ASC" ? " ▲" : " ▼") : "";
+    return `<th><button class="sort-column ${active ? "active-sort" : ""}" type="button" data-column="${escapeHtml(column)}">${escapeHtml(column)}${marker}</button></th>`;
+  }).join("");
   const rows = data.rows.map((row, rowIndex) => `
-    <tr>
+    <tr data-row-index="${rowIndex}">
       <td class="selector"><input class="row-check" type="checkbox" data-row-index="${rowIndex}" aria-label="Select row ${data.offset + rowIndex + 1}"></td>
       ${row.map((value) => `<td>${escapeHtml(value === null ? "NULL" : String(value))}</td>`).join("")}
     </tr>
@@ -276,11 +486,28 @@ function renderData(data: ObjectData): string {
   const body = rows || `<tr><td colspan="${data.columns.length + 1}" class="muted">No rows found.</td></tr>`;
   return `
     <div class="data-toolbar">
-      <button id="select-all" type="button">全選択</button>
-      <button id="clear-selection" type="button">選択解除</button>
-      <span class="muted">選択: <span id="selected-count">0</span></span>
-      <button id="copy-tsv" type="button" disabled>TSVコピー</button>
-      <button id="copy-insert" type="button" disabled>INSERT SQLコピー</button>
+      <div class="toolbar-group">
+        <button id="reload-data" type="button" title="Reload data">↻ Reload</button>
+      </div>
+      <div class="toolbar-group">
+        <input id="where-input" type="text" value="${escapeHtml(query.where)}" placeholder="where条件 例: ID &gt; 10">
+        <button id="apply-search" type="button" title="Apply search">Search</button>
+        <button id="clear-search" type="button" title="Clear search">Clear</button>
+      </div>
+      <div class="toolbar-group">
+        <button id="select-all" type="button">全選択</button>
+        <button id="clear-selection" type="button">選択解除</button>
+        <span class="selection-count">選択: <span id="selected-count">0</span></span>
+      </div>
+      <div class="toolbar-group">
+        <button id="copy-tsv" type="button" disabled>Copy TSV</button>
+        <button id="copy-insert" type="button" disabled>Copy INSERT</button>
+      </div>
+      <div class="toolbar-group">
+        <button id="export-csv" type="button">Save CSV</button>
+        <button id="export-tsv" type="button">Save TSV</button>
+        <button id="export-insert" type="button">Save INSERT</button>
+      </div>
       <span class="toolbar-spacer"></span>
       <span class="muted">${data.rows.length} rows loaded</span>
     </div>
@@ -317,13 +544,19 @@ function shell(profile: ConnectionProfile, object: DbObject, body: string, nonce
     .tab.active { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
     .panel { display: none; padding: 0 18px 18px; }
     .panel.active { display: block; }
-    .data-toolbar { align-items: center; display: flex; gap: 8px; margin: 12px 0; }
+    .data-toolbar { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+    .toolbar-group { align-items: center; border: 1px solid var(--vscode-panel-border); display: flex; gap: 6px; padding: 4px; }
     .toolbar-spacer { flex: 1; }
+    .selection-count { color: var(--vscode-descriptionForeground); min-width: 56px; padding: 0 4px; }
+    #where-input { background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border); color: var(--vscode-input-foreground); min-width: 280px; padding: 6px 8px; }
     .load-status { padding: 12px 0 18px; text-align: center; }
     table { border-collapse: collapse; width: 100%; font-size: 13px; }
     th, td { border: 1px solid var(--vscode-panel-border); padding: 6px 8px; text-align: left; vertical-align: top; white-space: nowrap; }
     th { background: var(--vscode-editorWidget-background); position: sticky; top: 0; }
+    tr.selected-row td { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
     .selector { text-align: center; width: 36px; }
+    .sort-column { background: transparent; color: inherit; display: block; font: inherit; padding: 0; text-align: left; width: 100%; }
+    .sort-column.active-sort { color: var(--vscode-textLink-foreground); font-weight: 600; }
     pre { overflow: auto; background: var(--vscode-textCodeBlock-background); padding: 12px; }
   </style>
 </head>
