@@ -1,0 +1,120 @@
+{
+  "name": "vsc-dbviewer-plugin",
+  "displayName": "DB Viewer",
+  "description": "Read-only JDBC database viewer for VS Code and compatible editors.",
+  "version": "0.2.1",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:dbViewer.connections",
+    "onCommand:dbViewer.addConnection",
+    "onCommand:dbViewer.editConnection",
+    "onCommand:dbViewer.duplicateConnection",
+    "onCommand:dbViewer.deleteConnection",
+    "onCommand:dbViewer.refresh",
+    "onCommand:dbViewer.openObject"
+  ],
+  "main": "./out/src/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "dbViewer",
+          "title": "DB Viewer",
+          "icon": "resources/database.svg"
+        }
+      ]
+    },
+    "views": {
+      "dbViewer": [
+        {
+          "id": "dbViewer.connections",
+          "name": "Connections"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "dbViewer.addConnection",
+        "title": "DB Viewer: Add Connection",
+        "icon": "$(add)"
+      },
+      {
+        "command": "dbViewer.editConnection",
+        "title": "DB Viewer: Edit Connection",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "dbViewer.deleteConnection",
+        "title": "DB Viewer: Delete Connection",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "dbViewer.duplicateConnection",
+        "title": "DB Viewer: Duplicate Connection",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "dbViewer.refresh",
+        "title": "DB Viewer: Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "dbViewer.openObject",
+        "title": "DB Viewer: Open Table or View"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "dbViewer.addConnection",
+          "when": "view == dbViewer.connections",
+          "group": "navigation"
+        },
+        {
+          "command": "dbViewer.refresh",
+          "when": "view == dbViewer.connections",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "dbViewer.openObject",
+          "when": "view == dbViewer.connections && viewItem == dbObject",
+          "group": "inline"
+        },
+        {
+          "command": "dbViewer.editConnection",
+          "when": "view == dbViewer.connections && viewItem == connection",
+          "group": "inline"
+        },
+        {
+          "command": "dbViewer.duplicateConnection",
+          "when": "view == dbViewer.connections && viewItem == connection",
+          "group": "inline"
+        },
+        {
+          "command": "dbViewer.deleteConnection",
+          "when": "view == dbViewer.connections && viewItem == connection",
+          "group": "inline"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "build:helper": "javac -d java-helper/build/classes java-helper/src/main/java/com/example/dbviewer/JdbcHelper.java",
+    "build": "npm run compile && npm run build:helper",
+    "test": "npm run compile && node out/test/profileStore.test.js && node out/test/jdbcClient.test.js && node out/test/copyFormat.test.js && node scripts/run-h2-test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.8.0"
+  }
+}
