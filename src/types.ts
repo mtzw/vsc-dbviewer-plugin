@@ -42,11 +42,33 @@ export interface DbObject {
 export interface ColumnInfo {
   name: string;
   typeName: string;
+  jdbcType: number | null;
   size: number | null;
   nullable: boolean;
   ordinal: number;
   defaultValue: string | null;
   remarks: string | null;
+}
+
+export type ConstraintType = "PRIMARY KEY" | "FOREIGN KEY" | "UNIQUE";
+
+export interface ConstraintInfo {
+  name: string | null;
+  type: ConstraintType;
+  columnName: string;
+  ordinal: number | null;
+  referencedSchema: string | null;
+  referencedTable: string | null;
+  referencedColumn: string | null;
+}
+
+export interface IndexInfo {
+  name: string | null;
+  unique: boolean;
+  columnName: string | null;
+  ordinal: number | null;
+  sortOrder: string | null;
+  type: string | null;
 }
 
 export interface ObjectInfo {
@@ -55,11 +77,20 @@ export interface ObjectInfo {
   type: DbObjectType;
   columns: ColumnInfo[];
   primaryKeys: string[];
+  constraints: ConstraintInfo[];
+  indexes: IndexInfo[];
   identifierQuoteString: string;
+}
+
+export interface DataColumnInfo {
+  name: string;
+  typeName: string | null;
+  jdbcType: number | null;
 }
 
 export interface ObjectData {
   columns: string[];
+  columnTypes: DataColumnInfo[];
   rows: Array<Array<string | number | boolean | null>>;
   limit: number;
   offset: number;

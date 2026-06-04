@@ -11,6 +11,13 @@ const object: DbObject = {
 
 const data: ObjectData = {
   columns: ["ID", "NAME", "ACTIVE", "CREATED_AT", "NOTE"],
+  columnTypes: [
+    { name: "ID", typeName: "INTEGER", jdbcType: 4 },
+    { name: "NAME", typeName: "VARCHAR", jdbcType: 12 },
+    { name: "ACTIVE", typeName: "BOOLEAN", jdbcType: 16 },
+    { name: "CREATED_AT", typeName: "TIMESTAMP", jdbcType: 93 },
+    { name: "NOTE", typeName: "VARCHAR", jdbcType: 12 }
+  ],
   rows: [
     [1, "Alice", true, "2026-06-03 10:20:30", null],
     [2, "Bob's row", false, "2026-06-04", "line1\nline2"]
@@ -25,6 +32,55 @@ test("formats selected rows as TSV", () => {
   assert.equal(
     toTsv(data, [0, 1]),
     "1\tAlice\ttrue\t2026-06-03 10:20:30\t\n2\tBob's row\tfalse\t2026-06-04\tline1 line2"
+  );
+});
+
+test("formats Oracle DATE values as Oracle date expressions", () => {
+  const oracleData: ObjectData = {
+    columns: ["ID", "CREATED_ON", "UPDATED_ON"],
+    columnTypes: [
+      { name: "ID", typeName: "NUMBER", jdbcType: 2 },
+      { name: "CREATED_ON", typeName: "DATE", jdbcType: 91 },
+      { name: "UPDATED_ON", typeName: "DATE", jdbcType: 91 }
+    ],
+    rows: [[1, "2026-06-04", "2026-06-04 10:20:30"]],
+    limit: 100,
+    offset: 0,
+    hasPrevious: false,
+    hasNext: false
+  };
+
+  assert.equal(
+    toInsertSql(oracleData, object, "\"", [0], "oracle"),
+    "INSERT INTO \"APP\".\"PERSON\" (\"ID\", \"CREATED_ON\", \"UPDATED_ON\") VALUES (1, DATE '2026-06-04', TO_DATE('2026-06-04 10:20:30', 'YYYY-MM-DD HH24:MI:SS'));"
+  );
+});
+
+test("formats Oracle TIMESTAMP values as Oracle timestamp expressions", () => {
+  const oracleData: ObjectData = {
+    columns: ["ID", "UPDATED_AT", "AUDITED_AT"],
+    columnTypes: [
+      { name: "ID", typeName: "NUMBER", jdbcType: 2 },
+      { name: "UPDATED_AT", typeName: "TIMESTAMP", jdbcType: 93 },
+      { name: "AUDITED_AT", typeName: "TIMESTAMP WITH TIME ZONE", jdbcType: 2014 }
+    ],
+    rows: [[1, "2026-06-04 10:20:30.123456", "2026-06-04 10:20:30 +09:00"]],
+    limit: 100,
+    offset: 0,
+    hasPrevious: false,
+    hasNext: false
+  };
+
+  assert.equal(
+    toInsertSql(oracleData, object, "\"", [0], "oracle"),
+    "INSERT INTO \"APP\".\"PERSON\" (\"ID\", \"UPDATED_AT\", \"AUDITED_AT\") VALUES (1, TIMESTAMP '2026-06-04 10:20:30.123456', TO_TIMESTAMP_TZ('2026-06-04 10:20:30 +09:00', 'YYYY-MM-DD HH24:MI:SS TZH:TZM'));"
+  );
+});
+
+test("keeps non-Oracle date and timestamp values as standard string literals", () => {
+  assert.equal(
+    toInsertSql(data, object, "\"", [0], "postgresql"),
+    "INSERT INTO \"APP\".\"PERSON\" (\"ID\", \"NAME\", \"ACTIVE\", \"CREATED_AT\", \"NOTE\") VALUES (1, 'Alice', TRUE, '2026-06-03 10:20:30', NULL);"
   );
 });
 

@@ -16,17 +16,31 @@ public final class JdbcHelperH2Test {
     String jdbcUrl = "jdbc:h2:mem:dbviewer;DB_CLOSE_DELAY=-1";
     try (Connection connection = DriverManager.getConnection(jdbcUrl, "sa", "");
          Statement statement = connection.createStatement()) {
-      statement.execute("create table person (id integer primary key, name varchar(40) not null)");
-      statement.execute("insert into person (id, name) values (1, 'Alice')");
-      statement.execute("insert into person (id, name) values (2, 'Bob')");
-      statement.execute("insert into person (id, name) values (3, 'Carol')");
+      statement.execute("create table department (id integer primary key, name varchar(40) not null unique)");
+      statement.execute("create table person (id integer primary key, department_id integer not null, name varchar(40) not null, email varchar(80), constraint uq_person_email unique (email), constraint fk_person_department foreign key (department_id) references department(id))");
+      statement.execute("create index ix_person_name on person(name)");
+      statement.execute("insert into department (id, name) values (1, 'Engineering')");
+      statement.execute("insert into person (id, department_id, name, email) values (1, 1, 'Alice', 'alice@example.com')");
+      statement.execute("insert into person (id, department_id, name, email) values (2, 1, 'Bob', 'bob@example.com')");
+      statement.execute("insert into person (id, department_id, name, email) values (3, 1, 'Carol', 'carol@example.com')");
       statement.execute("create view person_view as select id, name from person");
     }
 
     assertContains(call("testConnection", jdbcUrl, null), "\"connected\":true");
     assertContains(call("listTablesAndViews", jdbcUrl, "{\"schema\":null,\"name\":\"\",\"type\":\"TABLE\"}"), "\"name\":\"PERSON\"");
-    assertContains(call("getObjectInfo", jdbcUrl, "{\"schema\":null,\"name\":\"PERSON\",\"type\":\"TABLE\"}"), "\"primaryKeys\":[\"ID\"]");
-    assertContains(call("getObjectData", jdbcUrl, "{\"schema\":null,\"name\":\"PERSON\",\"type\":\"TABLE\"}", 100, 0), "\"Alice\"");
+    String info = call("getObjectInfo", jdbcUrl, "{\"schema\":null,\"name\":\"PERSON\",\"type\":\"TABLE\"}");
+    assertContains(info, "\"primaryKeys\":[\"ID\"]");
+    assertContains(info, "\"constraints\":[");
+    assertContains(info, "\"type\":\"PRIMARY KEY\"");
+    assertContains(info, "\"type\":\"FOREIGN KEY\"");
+    assertContains(info, "\"type\":\"UNIQUE\"");
+    assertContains(info, "\"referencedTable\":\"DEPARTMENT\"");
+    assertContains(info, "\"indexes\":[");
+    assertContains(info, "\"name\":\"IX_PERSON_NAME\"");
+    String data = call("getObjectData", jdbcUrl, "{\"schema\":null,\"name\":\"PERSON\",\"type\":\"TABLE\"}", 100, 0);
+    assertContains(data, "\"Alice\"");
+    assertContains(data, "\"columnTypes\":[");
+    assertContains(data, "\"jdbcType\":4");
     String paged = call("getObjectData", jdbcUrl, "{\"schema\":null,\"name\":\"PERSON\",\"type\":\"TABLE\"}", 1, 1);
     assertContains(paged, "\"offset\":1");
     assertContains(paged, "\"hasPrevious\":true");

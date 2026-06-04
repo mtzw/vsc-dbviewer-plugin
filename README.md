@@ -36,10 +36,15 @@ v1 では、SQL / TSV コピー、TSV 貼り付け Insert、Java Entity / Record
 - フォーム上で接続テストを実行し、結果を確認できます。
 - 接続プロファイルを複製できます。
 
+## v2.2 の改善点
+
+- DB Viewerツリーで、接続ノードや `Tables` / `Views` フォルダ単位のRefreshを実行できます。
+- Table / View詳細に `制約`、`インデックス` タブを追加しました。
+- 主キー、外部キー、Unique、IndexなどのJDBCメタデータ表示を強化しました。
+- `INSERT SQLコピー` でOracleのDATE / TIMESTAMP / TIMESTAMP WITH TIME ZONE向けリテラル生成に対応しました。
+
 ## ロードマップ
 
-- v2.1.x: ツリー情報のRefresh導線を強化します。接続ノードや `Tables` / `Views` フォルダ単位のRefreshを追加予定です。
-- v2.2: Table / View詳細に `制約`、`インデックス` タブを追加し、主キー、外部キー、Unique、Indexなどのメタデータ取得を強化します。`INSERT SQLコピー` ではOracleの日付 / 時刻型リテラル対応も追加予定です。
 - v2.3: テーブルデータの一括エクスポート機能を追加し、CSV / TSV / InsertSQL形式での保存に対応予定です。
 - v3.0: TSV形式のレコードをペーストしてInsertできるようにします。書き込み前の確認、トランザクション、失敗時の扱いを設計します。
 - v3.1以降: Java Entity / Record生成機能を追加し、型マッピング、命名規則、package、JPA / Jakarta対応などを設定可能にします。
@@ -94,7 +99,7 @@ npx @vscode/vsce package
 作成に成功すると、プロジェクト直下に次のようなファイルが生成されます。
 
 ```text
-vsc-dbviewer-plugin-0.2.1.vsix
+vsc-dbviewer-plugin-0.2.2.vsix
 ```
 
 バージョン番号は `package.json` の `version` に従います。配布前にバージョンを上げる場合は、`package.json` を更新してから `npm install --package-lock-only` を実行し、`package-lock.json` も同期してください。
@@ -106,7 +111,7 @@ vsc-dbviewer-plugin-0.2.1.vsix
 コマンドラインからインストールする場合:
 
 ```sh
-code --install-extension vsc-dbviewer-plugin-0.2.1.vsix
+code --install-extension vsc-dbviewer-plugin-0.2.2.vsix
 ```
 
 VS Code の画面からインストールする場合:
@@ -180,6 +185,8 @@ H2 の入力例:
 8. Table / View を開き、Webview 上で以下を確認します。
 
 - `情報`: カラム、型、Nullable、主キー、デフォルト値、備考
+- `制約`: 主キー、外部キー、Unique制約
+- `インデックス`: Index名、Unique、列、並び順、種別
 - `データ`: 最大 100 行の読み取り専用データ
 - `定義SQL`: JDBC メタデータから生成できる範囲の定義SQL、または取得できない場合の補足メッセージ
 
@@ -200,5 +207,5 @@ H2 の入力例:
 - View の定義SQLは汎用 JDBC メタデータだけでは取得できないため、v1 では補足メッセージを表示します。
 - DB ごとの厳密な DDL 取得は v1 ではベストエフォートです。
 - `INSERT SQLコピー` はクリップボードへ文字列をコピーするだけです。DBへの書き込みは行いません。
-- 現時点の `INSERT SQLコピー` は日付/時刻リテラルのRDB方言対応がベストエフォートです。OracleのDATE/TIMESTAMP向けリテラル対応はv2.2で追加予定です。
+- `INSERT SQLコピー` の日付/時刻リテラルのRDB方言対応はベストエフォートです。OracleのDATE/TIMESTAMP向けリテラル生成はJDBC型情報に基づいて行います。
 - DB側でTable / Viewを追加、削除した場合は、DB ViewerのRefreshを実行してツリーを更新してください。

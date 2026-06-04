@@ -2,7 +2,7 @@
   "name": "vsc-dbviewer-plugin",
   "displayName": "DB Viewer",
   "description": "Read-only JDBC database viewer for VS Code and compatible editors.",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "publisher": "local",
   "engines": {
     "vscode": "^1.90.0"
@@ -91,6 +91,16 @@
         {
           "command": "dbViewer.editConnection",
           "when": "view == dbViewer.connections && viewItem == connection",
+          "group": "inline"
+        },
+        {
+          "command": "dbViewer.refresh",
+          "when": "view == dbViewer.connections && viewItem == connection",
+          "group": "inline"
+        },
+        {
+          "command": "dbViewer.refresh",
+          "when": "view == dbViewer.connections && (viewItem == tables || viewItem == views)",
           "group": "inline"
         },
         {

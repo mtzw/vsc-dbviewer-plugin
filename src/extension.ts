@@ -4,7 +4,7 @@ import { JdbcClient } from "./jdbcClient";
 import { ObjectPanel } from "./objectPanel";
 import { ProfileStore } from "./profileStore";
 import { ConnectionProfile } from "./types";
-import { ConnectionNode, DbTreeProvider, ObjectNode } from "./treeProvider";
+import { ConnectionNode, DbTreeProvider, ObjectGroupNode, ObjectNode } from "./treeProvider";
 
 export function activate(context: vscode.ExtensionContext): void {
   const store = new ProfileStore(context.globalState, context.secrets);
@@ -13,7 +13,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.window.registerTreeDataProvider("dbViewer.connections", treeProvider),
-    vscode.commands.registerCommand("dbViewer.refresh", () => treeProvider.refresh()),
+    vscode.commands.registerCommand("dbViewer.refresh", (node?: ConnectionNode | ObjectGroupNode) => treeProvider.refresh(node)),
     vscode.commands.registerCommand("dbViewer.addConnection", async () => {
       const input = await ConnectionEditorPanel.open(context, client);
       if (!input) {

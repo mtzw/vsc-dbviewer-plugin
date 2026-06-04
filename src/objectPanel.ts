@@ -62,7 +62,7 @@ export class ObjectPanel {
             }
             const text = message.format === "tsv"
               ? toTsv(currentData, rowIndexes)
-              : toInsertSql(currentData, object, info.identifierQuoteString, rowIndexes);
+              : toInsertSql(currentData, object, info.identifierQuoteString, rowIndexes, profile.dbType);
             await vscode.env.clipboard.writeText(text);
             vscode.window.showInformationMessage(`${rowIndexes.length} row(s) copied as ${message.format === "tsv" ? "TSV" : "INSERT SQL"}.`);
           }
@@ -96,18 +96,28 @@ function renderObject(
   info: ObjectInfo,
   data: ObjectData,
   ddl: ObjectDdl,
-  activeTab: "info" | "data" | "ddl"
+  activeTab: "info" | "constraints" | "indexes" | "data" | "ddl"
 ): string {
   const nonce = createNonce();
   const content = `
     <div class="tabs" role="tablist">
       <button class="tab ${activeTab === "info" ? "active" : ""}" data-tab="info" type="button">情報</button>
+      <button class="tab ${activeTab === "constraints" ? "active" : ""}" data-tab="constraints" type="button">制約</button>
+      <button class="tab ${activeTab === "indexes" ? "active" : ""}" data-tab="indexes" type="button">インデックス</button>
       <button class="tab ${activeTab === "data" ? "active" : ""}" data-tab="data" type="button">データ</button>
       <button class="tab ${activeTab === "ddl" ? "active" : ""}" data-tab="ddl" type="button">定義SQL</button>
     </div>
     <section id="info" class="panel ${activeTab === "info" ? "active" : ""}">
       <h2>Columns</h2>
       ${renderInfo(info)}
+    </section>
+    <section id="constraints" class="panel ${activeTab === "constraints" ? "active" : ""}">
+      <h2>Constraints</h2>
+      ${renderConstraints(info)}
+    </section>
+    <section id="indexes" class="panel ${activeTab === "indexes" ? "active" : ""}">
+      <h2>Indexes</h2>
+      ${renderIndexes(info)}
     </section>
     <section id="data" class="panel ${activeTab === "data" ? "active" : ""}">
       <h2>Data <span class="muted">${data.rows.length} loaded</span></h2>
@@ -207,6 +217,50 @@ function renderInfo(info: ObjectInfo): string {
     <table>
       <thead><tr><th>Name</th><th>Type</th><th>Nullable</th><th>PK</th><th>Default</th><th>Remarks</th></tr></thead>
       <tbody>${rows}</tbody>
+    </table>
+  `;
+}
+
+function renderConstraints(info: ObjectInfo): string {
+  const rows = info.constraints.map((constraint) => {
+    const referenced = constraint.referencedTable
+      ? `${constraint.referencedSchema ? `${constraint.referencedSchema}.` : ""}${constraint.referencedTable}${constraint.referencedColumn ? `.${constraint.referencedColumn}` : ""}`
+      : "";
+    return `
+      <tr>
+        <td>${escapeHtml(constraint.name ?? "")}</td>
+        <td>${escapeHtml(constraint.type)}</td>
+        <td>${escapeHtml(constraint.columnName)}</td>
+        <td>${constraint.ordinal ?? ""}</td>
+        <td>${escapeHtml(referenced)}</td>
+      </tr>
+    `;
+  }).join("");
+  const body = rows || `<tr><td colspan="5" class="muted">No constraints found.</td></tr>`;
+  return `
+    <table>
+      <thead><tr><th>Name</th><th>Type</th><th>Column</th><th>Seq</th><th>References</th></tr></thead>
+      <tbody>${body}</tbody>
+    </table>
+  `;
+}
+
+function renderIndexes(info: ObjectInfo): string {
+  const rows = info.indexes.map((index) => `
+    <tr>
+      <td>${escapeHtml(index.name ?? "")}</td>
+      <td>${index.unique ? "YES" : "NO"}</td>
+      <td>${escapeHtml(index.columnName ?? "")}</td>
+      <td>${index.ordinal ?? ""}</td>
+      <td>${escapeHtml(index.sortOrder ?? "")}</td>
+      <td>${escapeHtml(index.type ?? "")}</td>
+    </tr>
+  `).join("");
+  const body = rows || `<tr><td colspan="6" class="muted">No indexes found.</td></tr>`;
+  return `
+    <table>
+      <thead><tr><th>Name</th><th>Unique</th><th>Column</th><th>Seq</th><th>Sort</th><th>Type</th></tr></thead>
+      <tbody>${body}</tbody>
     </table>
   `;
 }

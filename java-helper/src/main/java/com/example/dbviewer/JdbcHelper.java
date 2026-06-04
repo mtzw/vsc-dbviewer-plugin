@@ -111,6 +111,8 @@ public final class JdbcHelper {
         Map<String, Object> column = new LinkedHashMap<>();
         column.put("name", rs.getString("COLUMN_NAME"));
         column.put("typeName", rs.getString("TYPE_NAME"));
+        int jdbcType = rs.getInt("DATA_TYPE");
+        column.put("jdbcType", rs.wasNull() ? null : jdbcType);
         int size = rs.getInt("COLUMN_SIZE");
         column.put("size", rs.wasNull() ? null : size);
         column.put("nullable", rs.getInt("NULLABLE") == DatabaseMetaData.columnNullable);
@@ -122,12 +124,32 @@ public final class JdbcHelper {
     }
     columns.sort(Comparator.comparingInt(row -> ((Number) row.get("ordinal")).intValue()));
 
-    List<String> primaryKeys = new ArrayList<>();
+    List<Map<String, Object>> primaryKeyRows = new ArrayList<>();
     try (ResultSet rs = metadata.getPrimaryKeys(null, object.schema(), object.name())) {
       while (rs.next()) {
-        primaryKeys.add(rs.getString("COLUMN_NAME"));
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("name", rs.getString("PK_NAME"));
+        row.put("type", "PRIMARY KEY");
+        row.put("columnName", rs.getString("COLUMN_NAME"));
+        short ordinal = rs.getShort("KEY_SEQ");
+        row.put("ordinal", rs.wasNull() ? null : ordinal);
+        row.put("referencedSchema", null);
+        row.put("referencedTable", null);
+        row.put("referencedColumn", null);
+        primaryKeyRows.add(row);
       }
     }
+    primaryKeyRows.sort(Comparator.comparingInt(row -> numberOrZero(row.get("ordinal"))));
+    List<String> primaryKeys = new ArrayList<>();
+    for (Map<String, Object> row : primaryKeyRows) {
+      primaryKeys.add(string(row.get("columnName")));
+    }
+
+    List<Map<String, Object>> indexes = getIndexes(metadata, object);
+    List<Map<String, Object>> constraints = new ArrayList<>();
+    constraints.addAll(primaryKeyRows);
+    constraints.addAll(getForeignKeys(metadata, object));
+    constraints.addAll(uniqueConstraints(indexes));
 
     Map<String, Object> result = new LinkedHashMap<>();
     result.put("schema", object.schema());
@@ -135,8 +157,85 @@ public final class JdbcHelper {
     result.put("type", object.type());
     result.put("columns", columns);
     result.put("primaryKeys", primaryKeys);
+    result.put("constraints", constraints);
+    result.put("indexes", indexes);
     result.put("identifierQuoteString", normalizedIdentifierQuote(connection));
     return result;
+  }
+
+  private static List<Map<String, Object>> getForeignKeys(DatabaseMetaData metadata, DbObject object) throws SQLException {
+    List<Map<String, Object>> foreignKeys = new ArrayList<>();
+    try (ResultSet rs = metadata.getImportedKeys(null, object.schema(), object.name())) {
+      while (rs.next()) {
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("name", rs.getString("FK_NAME"));
+        row.put("type", "FOREIGN KEY");
+        row.put("columnName", rs.getString("FKCOLUMN_NAME"));
+        short ordinal = rs.getShort("KEY_SEQ");
+        row.put("ordinal", rs.wasNull() ? null : ordinal);
+        row.put("referencedSchema", rs.getString("PKTABLE_SCHEM"));
+        row.put("referencedTable", rs.getString("PKTABLE_NAME"));
+        row.put("referencedColumn", rs.getString("PKCOLUMN_NAME"));
+        foreignKeys.add(row);
+      }
+    }
+    foreignKeys.sort(Comparator
+      .comparing((Map<String, Object> row) -> string(row.get("name")))
+      .thenComparingInt(row -> numberOrZero(row.get("ordinal"))));
+    return foreignKeys;
+  }
+
+  private static List<Map<String, Object>> getIndexes(DatabaseMetaData metadata, DbObject object) throws SQLException {
+    List<Map<String, Object>> indexes = new ArrayList<>();
+    try (ResultSet rs = metadata.getIndexInfo(null, object.schema(), object.name(), false, false)) {
+      while (rs.next()) {
+        short type = rs.getShort("TYPE");
+        if (type == DatabaseMetaData.tableIndexStatistic) {
+          continue;
+        }
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("name", rs.getString("INDEX_NAME"));
+        row.put("unique", !rs.getBoolean("NON_UNIQUE"));
+        row.put("columnName", rs.getString("COLUMN_NAME"));
+        short ordinal = rs.getShort("ORDINAL_POSITION");
+        row.put("ordinal", rs.wasNull() ? null : ordinal);
+        row.put("sortOrder", rs.getString("ASC_OR_DESC"));
+        row.put("type", indexTypeName(type));
+        indexes.add(row);
+      }
+    }
+    indexes.sort(Comparator
+      .comparing((Map<String, Object> row) -> string(row.get("name")))
+      .thenComparingInt(row -> numberOrZero(row.get("ordinal"))));
+    return indexes;
+  }
+
+  private static List<Map<String, Object>> uniqueConstraints(List<Map<String, Object>> indexes) {
+    List<Map<String, Object>> constraints = new ArrayList<>();
+    for (Map<String, Object> index : indexes) {
+      if (!Boolean.TRUE.equals(index.get("unique")) || string(index.get("name")).isBlank()) {
+        continue;
+      }
+      Map<String, Object> row = new LinkedHashMap<>();
+      row.put("name", index.get("name"));
+      row.put("type", "UNIQUE");
+      row.put("columnName", index.get("columnName"));
+      row.put("ordinal", index.get("ordinal"));
+      row.put("referencedSchema", null);
+      row.put("referencedTable", null);
+      row.put("referencedColumn", null);
+      constraints.add(row);
+    }
+    return constraints;
+  }
+
+  private static String indexTypeName(short type) {
+    return switch (type) {
+      case DatabaseMetaData.tableIndexClustered -> "CLUSTERED";
+      case DatabaseMetaData.tableIndexHashed -> "HASHED";
+      case DatabaseMetaData.tableIndexOther -> "OTHER";
+      default -> "";
+    };
   }
 
   private static Map<String, Object> getObjectData(Connection connection, DbObject object, int limit, int offset) throws SQLException {
@@ -158,8 +257,15 @@ public final class JdbcHelper {
     try (ResultSet rs = statement.executeQuery(sql)) {
       ResultSetMetaData metadata = rs.getMetaData();
       List<String> columns = new ArrayList<>();
+      List<Map<String, Object>> columnTypes = new ArrayList<>();
       for (int i = 1; i <= metadata.getColumnCount(); i += 1) {
-        columns.add(metadata.getColumnLabel(i));
+        String columnName = metadata.getColumnLabel(i);
+        columns.add(columnName);
+        Map<String, Object> columnType = new LinkedHashMap<>();
+        columnType.put("name", columnName);
+        columnType.put("typeName", metadata.getColumnTypeName(i));
+        columnType.put("jdbcType", metadata.getColumnType(i));
+        columnTypes.add(columnType);
       }
       List<List<Object>> rows = new ArrayList<>();
       int skipped = 0;
@@ -182,6 +288,7 @@ public final class JdbcHelper {
       }
       Map<String, Object> result = new LinkedHashMap<>();
       result.put("columns", columns);
+      result.put("columnTypes", columnTypes);
       result.put("rows", rows);
       result.put("limit", limit);
       result.put("offset", offset);
@@ -372,6 +479,10 @@ public final class JdbcHelper {
 
   private static int intValue(Object value, int defaultValue) {
     return value instanceof Number number ? number.intValue() : defaultValue;
+  }
+
+  private static int numberOrZero(Object value) {
+    return value instanceof Number number ? number.intValue() : 0;
   }
 
   private static boolean isSystemSchema(String schema) {
