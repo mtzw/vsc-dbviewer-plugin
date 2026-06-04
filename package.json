@@ -3,7 +3,11 @@
   "displayName": "DB Viewer",
   "description": "Read-only JDBC database viewer for VS Code and compatible editors.",
   "version": "0.2.4",
-  "publisher": "local",
+  "publisher": "mtzw",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mtzw/vsc-dbviewer-plugin.git"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },

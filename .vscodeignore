@@ -5,3 +5,5 @@ java-helper/src/**
 java-helper/build/**/*.java
 *.map
 tsconfig.json
+.drivers/**
+PLAN.md
