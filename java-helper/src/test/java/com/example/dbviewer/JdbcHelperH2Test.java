@@ -37,6 +37,11 @@ public final class JdbcHelperH2Test {
     assertContains(info, "\"referencedTable\":\"DEPARTMENT\"");
     assertContains(info, "\"indexes\":[");
     assertContains(info, "\"name\":\"IX_PERSON_NAME\"");
+    String viewInfo = call("getObjectInfo", jdbcUrl, "{\"schema\":null,\"name\":\"PERSON_VIEW\",\"type\":\"VIEW\"}");
+    assertContains(viewInfo, "\"name\":\"PERSON_VIEW\"");
+    assertContains(viewInfo, "\"primaryKeys\":[]");
+    assertContains(viewInfo, "\"constraints\":[]");
+    assertContains(viewInfo, "\"indexes\":[]");
     String data = call("getObjectData", jdbcUrl, "{\"schema\":null,\"name\":\"PERSON\",\"type\":\"TABLE\"}", 100, 0);
     assertContains(data, "\"Alice\"");
     assertContains(data, "\"columnTypes\":[");

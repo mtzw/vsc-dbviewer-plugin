@@ -124,31 +124,18 @@ public final class JdbcHelper {
     }
     columns.sort(Comparator.comparingInt(row -> ((Number) row.get("ordinal")).intValue()));
 
-    List<Map<String, Object>> primaryKeyRows = new ArrayList<>();
-    try (ResultSet rs = metadata.getPrimaryKeys(null, object.schema(), object.name())) {
-      while (rs.next()) {
-        Map<String, Object> row = new LinkedHashMap<>();
-        row.put("name", rs.getString("PK_NAME"));
-        row.put("type", "PRIMARY KEY");
-        row.put("columnName", rs.getString("COLUMN_NAME"));
-        short ordinal = rs.getShort("KEY_SEQ");
-        row.put("ordinal", rs.wasNull() ? null : ordinal);
-        row.put("referencedSchema", null);
-        row.put("referencedTable", null);
-        row.put("referencedColumn", null);
-        primaryKeyRows.add(row);
-      }
-    }
-    primaryKeyRows.sort(Comparator.comparingInt(row -> numberOrZero(row.get("ordinal"))));
+    List<Map<String, Object>> primaryKeyRows = isView(object) ? List.of() : safePrimaryKeys(metadata, object);
     List<String> primaryKeys = new ArrayList<>();
     for (Map<String, Object> row : primaryKeyRows) {
       primaryKeys.add(string(row.get("columnName")));
     }
 
-    List<Map<String, Object>> indexes = getIndexes(metadata, object);
+    List<Map<String, Object>> indexes = isView(object) ? List.of() : safeIndexes(metadata, object);
     List<Map<String, Object>> constraints = new ArrayList<>();
     constraints.addAll(primaryKeyRows);
-    constraints.addAll(getForeignKeys(metadata, object));
+    if (!isView(object)) {
+      constraints.addAll(safeForeignKeys(metadata, object));
+    }
     constraints.addAll(uniqueConstraints(indexes));
 
     Map<String, Object> result = new LinkedHashMap<>();
@@ -161,6 +148,42 @@ public final class JdbcHelper {
     result.put("indexes", indexes);
     result.put("identifierQuoteString", normalizedIdentifierQuote(connection));
     return result;
+  }
+
+  private static List<Map<String, Object>> safePrimaryKeys(DatabaseMetaData metadata, DbObject object) {
+    try {
+      return getPrimaryKeys(metadata, object);
+    } catch (SQLException error) {
+      return List.of();
+    }
+  }
+
+  private static List<Map<String, Object>> getPrimaryKeys(DatabaseMetaData metadata, DbObject object) throws SQLException {
+    List<Map<String, Object>> primaryKeys = new ArrayList<>();
+    try (ResultSet rs = metadata.getPrimaryKeys(null, object.schema(), object.name())) {
+      while (rs.next()) {
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("name", rs.getString("PK_NAME"));
+        row.put("type", "PRIMARY KEY");
+        row.put("columnName", rs.getString("COLUMN_NAME"));
+        short ordinal = rs.getShort("KEY_SEQ");
+        row.put("ordinal", rs.wasNull() ? null : ordinal);
+        row.put("referencedSchema", null);
+        row.put("referencedTable", null);
+        row.put("referencedColumn", null);
+        primaryKeys.add(row);
+      }
+    }
+    primaryKeys.sort(Comparator.comparingInt(row -> numberOrZero(row.get("ordinal"))));
+    return primaryKeys;
+  }
+
+  private static List<Map<String, Object>> safeForeignKeys(DatabaseMetaData metadata, DbObject object) {
+    try {
+      return getForeignKeys(metadata, object);
+    } catch (SQLException error) {
+      return List.of();
+    }
   }
 
   private static List<Map<String, Object>> getForeignKeys(DatabaseMetaData metadata, DbObject object) throws SQLException {
@@ -183,6 +206,14 @@ public final class JdbcHelper {
       .comparing((Map<String, Object> row) -> string(row.get("name")))
       .thenComparingInt(row -> numberOrZero(row.get("ordinal"))));
     return foreignKeys;
+  }
+
+  private static List<Map<String, Object>> safeIndexes(DatabaseMetaData metadata, DbObject object) {
+    try {
+      return getIndexes(metadata, object);
+    } catch (SQLException error) {
+      return List.of();
+    }
   }
 
   private static List<Map<String, Object>> getIndexes(DatabaseMetaData metadata, DbObject object) throws SQLException {
@@ -396,6 +427,10 @@ public final class JdbcHelper {
     }
     Object type = map.get("type");
     return type == null ? "TABLE" : String.valueOf(type);
+  }
+
+  private static boolean isView(DbObject object) {
+    return "VIEW".equalsIgnoreCase(object.type());
   }
 
   private static String currentSchema(Connection connection) throws SQLException {
