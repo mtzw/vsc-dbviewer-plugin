@@ -103,13 +103,24 @@ export interface ObjectDdl {
   message: string | null;
 }
 
+export interface InsertRowsRequest {
+  object: DbObject;
+  columns: string[];
+  rows: Array<Array<string | null>>;
+}
+
+export interface InsertRowsResult {
+  insertedRows: number;
+}
+
 export type HelperAction =
   | "testConnection"
   | "listSchemas"
   | "listTablesAndViews"
   | "getObjectInfo"
   | "getObjectData"
-  | "getObjectDdl";
+  | "getObjectDdl"
+  | "insertRows";
 
 export interface HelperConnection {
   jdbcUrl: string;
@@ -127,6 +138,8 @@ export interface HelperRequest {
   where?: string;
   sortColumn?: string;
   sortDirection?: "ASC" | "DESC";
+  columns?: string[];
+  rows?: Array<Array<string | null>>;
 }
 
 export interface HelperResponse<T> {

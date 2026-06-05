@@ -3,7 +3,8 @@ import * as fs from "node:fs";
 import { toExportCsv, toExportTsv, toInsertSql, toTsv } from "./copyFormat";
 import { JdbcClient } from "./jdbcClient";
 import { ProfileStore } from "./profileStore";
-import { DbObject, ObjectData, ObjectDdl, ObjectInfo, ConnectionProfile } from "./types";
+import { buildTsvInsertPreview, TsvInsertPreview } from "./tsvInsert";
+import { DbObject, ObjectData, ObjectDdl, ObjectInfo, ConnectionProfile, InsertRowsResult } from "./types";
 
 type ExportFormat = "csv" | "tsv" | "insert";
 type SortDirection = "ASC" | "DESC";
@@ -44,7 +45,8 @@ export class ObjectPanel {
       let query: DataQuery = { where: "", sortColumn: null, sortDirection: "ASC" };
       const firstPage = await loadObjectData(client, profile, password, object, query, 0, DATA_PAGE_SIZE);
       let currentData = firstPage;
-      panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "info", query);
+      let tsvInsertPreview: TsvInsertPreview | undefined;
+      panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "info", query, tsvInsertPreview);
 
       panel.webview.onDidReceiveMessage(async (message: WebviewMessage) => {
         try {
@@ -59,31 +61,34 @@ export class ObjectPanel {
               offset: 0,
               hasPrevious: false
             };
-            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query);
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview);
             return;
           }
 
           if (message.type === "reload") {
+            tsvInsertPreview = undefined;
             currentData = await loadObjectData(client, profile, password, object, query, 0, currentData.limit);
-            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query);
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview);
             return;
           }
 
           if (message.type === "search") {
+            tsvInsertPreview = undefined;
             query = { ...query, where: message.where.trim() };
             currentData = await loadObjectData(client, profile, password, object, query, 0, currentData.limit);
-            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query);
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview);
             return;
           }
 
           if (message.type === "sort") {
+            tsvInsertPreview = undefined;
             query = {
               ...query,
               sortColumn: message.column,
               sortDirection: query.sortColumn === message.column && query.sortDirection === "ASC" ? "DESC" : "ASC"
             };
             currentData = await loadObjectData(client, profile, password, object, query, 0, currentData.limit);
-            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query);
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview);
             return;
           }
 
@@ -103,6 +108,35 @@ export class ObjectPanel {
 
           if (message.type === "export") {
             await exportObject(client, profile, password, object, info, message.format, query);
+            return;
+          }
+
+          if (message.type === "previewTsvInsert") {
+            tsvInsertPreview = buildTsvInsertPreview(object, info, message.tsv);
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview);
+            return;
+          }
+
+          if (message.type === "cancelTsvInsert") {
+            tsvInsertPreview = undefined;
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview);
+            return;
+          }
+
+          if (message.type === "confirmTsvInsert") {
+            if (!tsvInsertPreview || tsvInsertPreview.errors.length > 0) {
+              vscode.window.showErrorMessage("TSV Insertのプレビューを確認してください。");
+              return;
+            }
+            const result = await client.request<InsertRowsResult>(profile, password, "insertRows", {
+              object,
+              columns: tsvInsertPreview.columns,
+              rows: tsvInsertPreview.rows
+            });
+            vscode.window.showInformationMessage(`${result.insertedRows} row(s) inserted into ${object.name}.`);
+            tsvInsertPreview = undefined;
+            currentData = await loadObjectData(client, profile, password, object, query, 0, currentData.limit);
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview);
           }
         } catch (error) {
           vscode.window.showErrorMessage((error as Error).message);
@@ -120,7 +154,10 @@ type WebviewMessage =
   | { type: "search"; where: string }
   | { type: "sort"; column: string }
   | { type: "copy"; format: "tsv" | "insert"; rowIndexes: number[] }
-  | { type: "export"; format: ExportFormat };
+  | { type: "export"; format: ExportFormat }
+  | { type: "previewTsvInsert"; tsv: string }
+  | { type: "cancelTsvInsert" }
+  | { type: "confirmTsvInsert" };
 
 async function loadObjectData(
   client: JdbcClient,
@@ -273,7 +310,8 @@ function renderObject(
   data: ObjectData,
   ddl: ObjectDdl,
   activeTab: "info" | "constraints" | "indexes" | "data" | "ddl",
-  query: DataQuery
+  query: DataQuery,
+  tsvInsertPreview?: TsvInsertPreview
 ): string {
   const nonce = createNonce();
   const content = `
@@ -298,7 +336,7 @@ function renderObject(
     </section>
     <section id="data" class="panel ${activeTab === "data" ? "active" : ""}">
       <h2>Data <span class="muted">${data.rows.length} loaded</span></h2>
-      ${renderData(data, query)}
+      ${renderData(data, query, object, tsvInsertPreview)}
     </section>
     <section id="ddl" class="panel ${activeTab === "ddl" ? "active" : ""}">
       <h2>Definition SQL</h2>
@@ -319,6 +357,12 @@ function renderObject(
         const exportCsv = document.querySelector("#export-csv");
         const exportTsv = document.querySelector("#export-tsv");
         const exportInsert = document.querySelector("#export-insert");
+        const openTsvInsert = document.querySelector("#open-tsv-insert");
+        const tsvInsertModal = document.querySelector("#tsv-insert-modal");
+        const tsvInsertInput = document.querySelector("#tsv-insert-input");
+        const previewTsvInsert = document.querySelector("#preview-tsv-insert");
+        const cancelTsvInsert = document.querySelector("#cancel-tsv-insert");
+        const confirmTsvInsert = document.querySelector("#confirm-tsv-insert");
         const selectAll = document.querySelector("#select-all");
         const clearSelection = document.querySelector("#clear-selection");
         const loadStatus = document.querySelector("#load-status");
@@ -375,6 +419,21 @@ function renderObject(
         exportCsv.addEventListener("click", () => vscode.postMessage({ type: "export", format: "csv" }));
         exportTsv.addEventListener("click", () => vscode.postMessage({ type: "export", format: "tsv" }));
         exportInsert.addEventListener("click", () => vscode.postMessage({ type: "export", format: "insert" }));
+        if (openTsvInsert && tsvInsertModal && tsvInsertInput) {
+          openTsvInsert.addEventListener("click", () => {
+            tsvInsertModal.classList.add("active");
+            tsvInsertInput.focus();
+          });
+        }
+        if (previewTsvInsert && tsvInsertInput) {
+          previewTsvInsert.addEventListener("click", () => vscode.postMessage({ type: "previewTsvInsert", tsv: tsvInsertInput.value }));
+        }
+        if (cancelTsvInsert) {
+          cancelTsvInsert.addEventListener("click", () => vscode.postMessage({ type: "cancelTsvInsert" }));
+        }
+        if (confirmTsvInsert) {
+          confirmTsvInsert.addEventListener("click", () => vscode.postMessage({ type: "confirmTsvInsert" }));
+        }
         reloadData.addEventListener("click", () => vscode.postMessage({ type: "reload" }));
         applySearch.addEventListener("click", () => vscode.postMessage({ type: "search", where: whereInput.value }));
         clearSearch.addEventListener("click", () => {
@@ -471,7 +530,7 @@ function renderIndexes(info: ObjectInfo): string {
   `;
 }
 
-function renderData(data: ObjectData, query: DataQuery): string {
+function renderData(data: ObjectData, query: DataQuery, object: DbObject, tsvInsertPreview?: TsvInsertPreview): string {
   const headers = data.columns.map((column) => {
     const active = query.sortColumn === column;
     const marker = active ? (query.sortDirection === "ASC" ? " ▲" : " ▼") : "";
@@ -508,15 +567,70 @@ function renderData(data: ObjectData, query: DataQuery): string {
         <button id="export-tsv" type="button">Save TSV</button>
         <button id="export-insert" type="button">Save INSERT</button>
       </div>
+      ${object.type === "TABLE" ? `
+        <div class="toolbar-group">
+          <button id="open-tsv-insert" type="button">Paste TSV Insert</button>
+        </div>
+      ` : ""}
       <span class="toolbar-spacer"></span>
       <span class="muted">${data.rows.length} rows loaded</span>
     </div>
+    ${object.type === "TABLE" ? renderTsvInsertModal(object, data, tsvInsertPreview) : ""}
     <table>
       <thead><tr><th class="selector"></th>${headers}</tr></thead>
       <tbody>${body}</tbody>
     </table>
     <div id="load-status" class="load-status muted">${data.hasNext ? "末尾までスクロールすると追加ロードします。" : "すべての表示可能な行を読み込みました。"}</div>
   `;
+}
+
+function renderTsvInsertModal(object: DbObject, data: ObjectData, preview?: TsvInsertPreview): string {
+  const activeClass = preview ? " active" : "";
+  const errors = preview?.errors ?? [];
+  const hasErrors = errors.length > 0;
+  const previewRows = preview?.previewRows ?? [];
+  const previewHeaders = data.columns.map((column) => `<th>${escapeHtml(column)}</th>`).join("");
+  const previewBody = previewRows.length > 0
+    ? previewRows.map((row) => `
+      <tr>${data.columns.map((_, index) => `<td>${escapeHtml(renderPreviewValue(row[index]))}</td>`).join("")}</tr>
+    `).join("")
+    : `<tr><td colspan="${Math.max(data.columns.length, 1)}" class="muted">PreviewするTSVを入力してください。</td></tr>`;
+  const errorList = hasErrors
+    ? `<ul class="insert-errors">${errors.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}</ul>`
+    : "";
+  return `
+    <div id="tsv-insert-modal" class="modal${activeClass}">
+      <div class="modal-dialog" role="dialog" aria-modal="true" aria-label="TSV Insert Preview">
+        <h3>Paste TSV Insert</h3>
+        <div class="insert-summary">
+          <span>Target: ${escapeHtml(object.schema ? `${object.schema}.${object.name}` : object.name)}</span>
+          <span>Rows: ${preview?.rowCount ?? 0}</span>
+          <span>Columns: ${data.columns.length}</span>
+          <span>NULL: ${preview?.nullCount ?? 0}</span>
+        </div>
+        <textarea id="tsv-insert-input" spellcheck="false" placeholder="テーブル列順のTSVを貼り付けます。空欄は空文字、\\NはNULLとして扱います。">${escapeHtml(preview?.sourceText ?? "")}</textarea>
+        ${errorList}
+        <div class="preview-table">
+          <table>
+            <thead><tr>${previewHeaders}</tr></thead>
+            <tbody>${previewBody}</tbody>
+          </table>
+        </div>
+        <div class="modal-actions">
+          <button id="cancel-tsv-insert" type="button">Cancel</button>
+          <button id="preview-tsv-insert" type="button">Preview</button>
+          <button id="confirm-tsv-insert" type="button" ${!preview || hasErrors ? "disabled" : ""}>Insert</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderPreviewValue(value: string | null | undefined): string {
+  if (value === null) {
+    return "NULL";
+  }
+  return value ?? "";
 }
 
 function shell(profile: ConnectionProfile, object: DbObject, body: string, nonce = ""): string {
@@ -557,6 +671,15 @@ function shell(profile: ConnectionProfile, object: DbObject, body: string, nonce
     .selector { text-align: center; width: 36px; }
     .sort-column { background: transparent; color: inherit; display: block; font: inherit; padding: 0; text-align: left; width: 100%; }
     .sort-column.active-sort { color: var(--vscode-textLink-foreground); font-weight: 600; }
+    .modal { align-items: center; background: rgba(0, 0, 0, 0.35); display: none; inset: 0; justify-content: center; position: fixed; z-index: 10; }
+    .modal.active { display: flex; }
+    .modal-dialog { background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35); max-height: 88vh; overflow: auto; padding: 16px; width: min(980px, calc(100vw - 36px)); }
+    .modal-dialog h3 { font-size: 15px; margin: 0 0 10px; }
+    .insert-summary { color: var(--vscode-descriptionForeground); display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 10px; }
+    #tsv-insert-input { background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border); color: var(--vscode-input-foreground); box-sizing: border-box; font-family: var(--vscode-editor-font-family); min-height: 140px; padding: 8px; width: 100%; }
+    .insert-errors { color: var(--vscode-errorForeground); margin: 10px 0; padding-left: 20px; }
+    .preview-table { margin-top: 10px; max-height: 320px; overflow: auto; }
+    .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
     pre { overflow: auto; background: var(--vscode-textCodeBlock-background); padding: 12px; }
   </style>
 </head>

@@ -124,7 +124,7 @@
     "compile": "tsc -p .",
     "build:helper": "javac -d java-helper/build/classes java-helper/src/main/java/com/example/dbviewer/JdbcHelper.java",
     "build": "npm run compile && npm run build:helper",
-    "test": "npm run compile && node out/test/profileStore.test.js && node out/test/jdbcClient.test.js && node out/test/copyFormat.test.js && node scripts/run-h2-test.js"
+    "test": "npm run compile && node out/test/profileStore.test.js && node out/test/jdbcClient.test.js && node out/test/copyFormat.test.js && node out/test/tsvInsert.test.js && node scripts/run-h2-test.js"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

@@ -3,16 +3,24 @@ package com.example.dbviewer;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.sql.Time;
+import java.sql.Timestamp;
+import java.sql.Types;
+import java.sql.Date;
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -66,6 +74,7 @@ public final class JdbcHelper {
           nullableString(request.get("sortDirection"))
         );
         case "getObjectDdl" -> getObjectDdl(connection, object(request));
+        case "insertRows" -> insertRows(connection, object(request), stringList(request.get("columns")), rowList(request.get("rows")));
         default -> throw new IllegalArgumentException("Unknown action: " + action);
       };
     }
@@ -409,6 +418,141 @@ public final class JdbcHelper {
     return result;
   }
 
+  private static Map<String, Object> insertRows(
+    Connection connection,
+    DbObject object,
+    List<String> columns,
+    List<List<Object>> rows
+  ) throws SQLException {
+    if (isView(object)) {
+      throw new SQLException("TSV Insert is available for tables only.");
+    }
+    if (columns.isEmpty()) {
+      throw new SQLException("Insert columns are required.");
+    }
+    if (rows.isEmpty()) {
+      throw new SQLException("Insert rows are required.");
+    }
+    for (int i = 0; i < rows.size(); i += 1) {
+      if (rows.get(i).size() != columns.size()) {
+        throw new SQLException("Row " + (i + 1) + " has " + rows.get(i).size() + " value(s), expected " + columns.size() + ".");
+      }
+    }
+
+    boolean originalAutoCommit = connection.getAutoCommit();
+    connection.setAutoCommit(false);
+    int insertedRows = 0;
+    Map<String, Integer> jdbcTypes = columnJdbcTypes(connection, object, columns);
+    try (PreparedStatement statement = connection.prepareStatement(insertSql(connection, object, columns))) {
+      for (List<Object> row : rows) {
+        for (int i = 0; i < row.size(); i += 1) {
+          int jdbcType = jdbcTypes.get(columns.get(i));
+          bindInsertValue(statement, i + 1, row.get(i), jdbcType);
+        }
+        statement.addBatch();
+      }
+      int[] counts = statement.executeBatch();
+      for (int count : counts) {
+        if (count > 0) {
+          insertedRows += count;
+        } else if (count == Statement.SUCCESS_NO_INFO) {
+          insertedRows += 1;
+        }
+      }
+      connection.commit();
+      return Map.of("insertedRows", insertedRows);
+    } catch (SQLException error) {
+      connection.rollback();
+      throw error;
+    } finally {
+      connection.setAutoCommit(originalAutoCommit);
+    }
+  }
+
+  private static String insertSql(Connection connection, DbObject object, List<String> columns) throws SQLException {
+    StringBuilder sql = new StringBuilder("insert into ");
+    sql.append(qualifiedName(connection, object)).append(" (");
+    for (int i = 0; i < columns.size(); i += 1) {
+      if (i > 0) {
+        sql.append(", ");
+      }
+      sql.append(quote(connection, columns.get(i)));
+    }
+    sql.append(") values (");
+    for (int i = 0; i < columns.size(); i += 1) {
+      if (i > 0) {
+        sql.append(", ");
+      }
+      sql.append("?");
+    }
+    sql.append(")");
+    return sql.toString();
+  }
+
+  private static Map<String, Integer> columnJdbcTypes(Connection connection, DbObject object, List<String> columns) throws SQLException {
+    DatabaseMetaData metadata = connection.getMetaData();
+    Map<String, Integer> available = new HashMap<>();
+    try (ResultSet rs = metadata.getColumns(null, object.schema(), object.name(), "%")) {
+      while (rs.next()) {
+        String name = rs.getString("COLUMN_NAME");
+        int jdbcType = rs.getInt("DATA_TYPE");
+        if (!rs.wasNull()) {
+          available.put(name, jdbcType);
+          available.put(name.toUpperCase(), jdbcType);
+          available.put(name.toLowerCase(), jdbcType);
+        }
+      }
+    }
+
+    Map<String, Integer> result = new LinkedHashMap<>();
+    for (String column : columns) {
+      Integer jdbcType = available.get(column);
+      if (jdbcType == null) {
+        throw new SQLException("Column metadata is not available for insert column: " + column);
+      }
+      result.put(column, jdbcType);
+    }
+    return result;
+  }
+
+  private static void bindInsertValue(PreparedStatement statement, int parameterIndex, Object value, int jdbcType) throws SQLException {
+    if (value == null) {
+      statement.setNull(parameterIndex, jdbcType);
+      return;
+    }
+    String text = String.valueOf(value);
+    try {
+      statement.setObject(parameterIndex, typedInsertValue(text, jdbcType), jdbcType);
+    } catch (RuntimeException error) {
+      throw new SQLException("Value '" + text + "' cannot be converted for parameter " + parameterIndex + " (JDBC type " + jdbcType + ").", error);
+    }
+  }
+
+  private static Object typedInsertValue(String value, int jdbcType) {
+    return switch (jdbcType) {
+      case Types.TINYINT, Types.SMALLINT, Types.INTEGER -> Integer.valueOf(value);
+      case Types.BIGINT -> Long.valueOf(value);
+      case Types.REAL, Types.FLOAT -> Float.valueOf(value);
+      case Types.DOUBLE -> Double.valueOf(value);
+      case Types.NUMERIC, Types.DECIMAL -> new BigDecimal(value);
+      case Types.BOOLEAN, Types.BIT -> parseBoolean(value);
+      case Types.DATE -> Date.valueOf(value);
+      case Types.TIME, Types.TIME_WITH_TIMEZONE -> Time.valueOf(value);
+      case Types.TIMESTAMP -> Timestamp.valueOf(value.replace("T", " "));
+      case Types.TIMESTAMP_WITH_TIMEZONE -> OffsetDateTime.parse(value);
+      default -> value;
+    };
+  }
+
+  private static Boolean parseBoolean(String value) {
+    String normalized = value.trim().toLowerCase();
+    return switch (normalized) {
+      case "true", "t", "1", "yes", "y" -> Boolean.TRUE;
+      case "false", "f", "0", "no", "n" -> Boolean.FALSE;
+      default -> throw new IllegalArgumentException("Invalid boolean value: " + value);
+    };
+  }
+
   private static ObjectInfoParts objectInfoParts(Connection connection, DbObject object) throws SQLException {
     Map<String, Object> info = getObjectInfo(connection, object);
     @SuppressWarnings("unchecked")
@@ -546,6 +690,31 @@ public final class JdbcHelper {
 
   private static int intValue(Object value, int defaultValue) {
     return value instanceof Number number ? number.intValue() : defaultValue;
+  }
+
+  private static List<String> stringList(Object value) {
+    if (!(value instanceof List<?> list)) {
+      return List.of();
+    }
+    List<String> result = new ArrayList<>();
+    for (Object item : list) {
+      result.add(string(item));
+    }
+    return result;
+  }
+
+  private static List<List<Object>> rowList(Object value) {
+    if (!(value instanceof List<?> list)) {
+      return List.of();
+    }
+    List<List<Object>> result = new ArrayList<>();
+    for (Object rawRow : list) {
+      if (!(rawRow instanceof List<?> row)) {
+        throw new IllegalArgumentException("Each row must be an array.");
+      }
+      result.add(new ArrayList<>(row));
+    }
+    return result;
   }
 
   private static int numberOrZero(Object value) {

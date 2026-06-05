@@ -23,6 +23,8 @@ public final class JdbcHelperH2Test {
       statement.execute("insert into person (id, department_id, name, email) values (1, 1, 'Alice', 'alice@example.com')");
       statement.execute("insert into person (id, department_id, name, email) values (2, 1, 'Bob', 'bob@example.com')");
       statement.execute("insert into person (id, department_id, name, email) values (3, 1, 'Carol', 'carol@example.com')");
+      statement.execute("create table tsv_import (id integer primary key, name varchar(40) not null, note varchar(80))");
+      statement.execute("create table tsv_typed_import (id integer primary key, amount decimal(10, 2), active boolean)");
       statement.execute("create view person_view as select id, name from person");
     }
 
@@ -57,6 +59,39 @@ public final class JdbcHelperH2Test {
     assertContains(paged, "\"hasNext\":true");
     assertContains(paged, "\"Bob\"");
     assertContains(call("getObjectDdl", jdbcUrl, "{\"schema\":null,\"name\":\"PERSON\",\"type\":\"TABLE\"}", 100, 0), "CREATE TABLE");
+    String inserted = call(
+      "insertRows",
+      jdbcUrl,
+      "{\"schema\":null,\"name\":\"TSV_IMPORT\",\"type\":\"TABLE\"}",
+      100,
+      0,
+      ",\"columns\":[\"ID\",\"NAME\",\"NOTE\"],\"rows\":[[10,\"Dave\",null],[11,\"Eve\",\"\"]]"
+    );
+    assertContains(inserted, "\"insertedRows\":2");
+    String imported = call("getObjectData", jdbcUrl, "{\"schema\":null,\"name\":\"TSV_IMPORT\",\"type\":\"TABLE\"}", 100, 0);
+    assertContains(imported, "[10,\"Dave\",null]");
+    assertContains(imported, "[11,\"Eve\",\"\"]");
+    String typedInserted = call(
+      "insertRows",
+      jdbcUrl,
+      "{\"schema\":null,\"name\":\"TSV_TYPED_IMPORT\",\"type\":\"TABLE\"}",
+      100,
+      0,
+      ",\"columns\":[\"ID\",\"AMOUNT\",\"ACTIVE\"],\"rows\":[[\"20\",\"123.45\",\"true\"],[\"21\",\"0.50\",\"0\"]]"
+    );
+    assertContains(typedInserted, "\"insertedRows\":2");
+    String typedImported = call("getObjectData", jdbcUrl, "{\"schema\":null,\"name\":\"TSV_TYPED_IMPORT\",\"type\":\"TABLE\"}", 100, 0);
+    assertContains(typedImported, "[20,123.45,true]");
+    assertContains(typedImported, "[21,0.50,false]");
+    String failed = callFailure(
+      "insertRows",
+      jdbcUrl,
+      "{\"schema\":null,\"name\":\"TSV_IMPORT\",\"type\":\"TABLE\"}",
+      ",\"columns\":[\"ID\",\"NAME\",\"NOTE\"],\"rows\":[[12,\"Frank\",\"ok\"],[10,\"Grace\",\"duplicate\"]]"
+    );
+    assertContains(failed, "\"ok\":false");
+    String afterRollback = call("getObjectData", jdbcUrl, "{\"schema\":null,\"name\":\"TSV_IMPORT\",\"type\":\"TABLE\"}", 100, 0);
+    assertNotContains(afterRollback, "\"Frank\"");
     System.out.println("Java helper H2 integration test passed.");
   }
 
@@ -95,6 +130,34 @@ public final class JdbcHelperH2Test {
     String response = output.toString(StandardCharsets.UTF_8);
     assertContains(response, "\"ok\":true");
     return response;
+  }
+
+  private static String callFailure(String action, String jdbcUrl, String objectJson, String extraJson) throws Exception {
+    String request = "{"
+      + "\"action\":\"" + action + "\","
+      + "\"connection\":{"
+      + "\"jdbcUrl\":\"" + jdbcUrl + "\","
+      + "\"driverClass\":\"org.h2.Driver\","
+      + "\"username\":\"sa\","
+      + "\"password\":\"\""
+      + "},"
+      + "\"object\":" + objectJson
+      + extraJson
+      + "}";
+
+    ByteArrayInputStream input = new ByteArrayInputStream(request.getBytes(StandardCharsets.UTF_8));
+    ByteArrayOutputStream output = new ByteArrayOutputStream();
+    PrintStream originalOut = System.out;
+    var originalIn = System.in;
+    try {
+      System.setIn(input);
+      System.setOut(new PrintStream(output, true, StandardCharsets.UTF_8));
+      JdbcHelper.main(new String[0]);
+    } finally {
+      System.setIn(originalIn);
+      System.setOut(originalOut);
+    }
+    return output.toString(StandardCharsets.UTF_8);
   }
 
   private static void assertContains(String value, String expected) {
