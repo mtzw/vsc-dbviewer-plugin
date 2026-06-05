@@ -20,6 +20,7 @@ public final class JdbcHelperH2Test {
       statement.execute("create table person (id integer primary key, department_id integer not null, name varchar(40) not null, email varchar(80), constraint uq_person_email unique (email), constraint fk_person_department foreign key (department_id) references department(id))");
       statement.execute("create index ix_person_name on person(name)");
       statement.execute("insert into department (id, name) values (1, 'Engineering')");
+      statement.execute("insert into department (id, name) values (2, 'Sales')");
       statement.execute("insert into person (id, department_id, name, email) values (1, 1, 'Alice', 'alice@example.com')");
       statement.execute("insert into person (id, department_id, name, email) values (2, 1, 'Bob', 'bob@example.com')");
       statement.execute("insert into person (id, department_id, name, email) values (3, 1, 'Carol', 'carol@example.com')");
@@ -71,6 +72,17 @@ public final class JdbcHelperH2Test {
     String imported = call("getObjectData", jdbcUrl, "{\"schema\":null,\"name\":\"TSV_IMPORT\",\"type\":\"TABLE\"}", 100, 0);
     assertContains(imported, "[10,\"Dave\",null]");
     assertContains(imported, "[11,\"Eve\",\"\"]");
+    String deleted = call(
+      "deleteRows",
+      jdbcUrl,
+      "{\"schema\":null,\"name\":\"TSV_IMPORT\",\"type\":\"TABLE\"}",
+      100,
+      0,
+      ",\"primaryKeyColumns\":[\"ID\"],\"rows\":[[11]]"
+    );
+    assertContains(deleted, "\"deletedRows\":1");
+    String afterDelete = call("getObjectData", jdbcUrl, "{\"schema\":null,\"name\":\"TSV_IMPORT\",\"type\":\"TABLE\"}", 100, 0);
+    assertNotContains(afterDelete, "\"Eve\"");
     String typedInserted = call(
       "insertRows",
       jdbcUrl,
@@ -92,6 +104,15 @@ public final class JdbcHelperH2Test {
     assertContains(failed, "\"ok\":false");
     String afterRollback = call("getObjectData", jdbcUrl, "{\"schema\":null,\"name\":\"TSV_IMPORT\",\"type\":\"TABLE\"}", 100, 0);
     assertNotContains(afterRollback, "\"Frank\"");
+    String failedDelete = callFailure(
+      "deleteRows",
+      jdbcUrl,
+      "{\"schema\":null,\"name\":\"DEPARTMENT\",\"type\":\"TABLE\"}",
+      ",\"primaryKeyColumns\":[\"ID\"],\"rows\":[[2],[1]]"
+    );
+    assertContains(failedDelete, "\"ok\":false");
+    String departmentsAfterRollback = call("getObjectData", jdbcUrl, "{\"schema\":null,\"name\":\"DEPARTMENT\",\"type\":\"TABLE\"}", 100, 0);
+    assertContains(departmentsAfterRollback, "[2,\"Sales\"]");
     System.out.println("Java helper H2 integration test passed.");
   }
 

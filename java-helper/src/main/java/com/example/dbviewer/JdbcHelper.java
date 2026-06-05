@@ -75,6 +75,7 @@ public final class JdbcHelper {
         );
         case "getObjectDdl" -> getObjectDdl(connection, object(request));
         case "insertRows" -> insertRows(connection, object(request), stringList(request.get("columns")), rowList(request.get("rows")));
+        case "deleteRows" -> deleteRows(connection, object(request), stringList(request.get("primaryKeyColumns")), rowList(request.get("rows")));
         default -> throw new IllegalArgumentException("Unknown action: " + action);
       };
     }
@@ -486,6 +487,69 @@ public final class JdbcHelper {
       sql.append("?");
     }
     sql.append(")");
+    return sql.toString();
+  }
+
+  private static Map<String, Object> deleteRows(
+    Connection connection,
+    DbObject object,
+    List<String> primaryKeyColumns,
+    List<List<Object>> rows
+  ) throws SQLException {
+    if (isView(object)) {
+      throw new SQLException("Selected row delete is available for tables only.");
+    }
+    if (primaryKeyColumns.isEmpty()) {
+      throw new SQLException("Primary key columns are required.");
+    }
+    if (rows.isEmpty()) {
+      throw new SQLException("Delete rows are required.");
+    }
+    for (int i = 0; i < rows.size(); i += 1) {
+      if (rows.get(i).size() != primaryKeyColumns.size()) {
+        throw new SQLException("Row " + (i + 1) + " has " + rows.get(i).size() + " primary key value(s), expected " + primaryKeyColumns.size() + ".");
+      }
+    }
+
+    boolean originalAutoCommit = connection.getAutoCommit();
+    connection.setAutoCommit(false);
+    int deletedRows = 0;
+    Map<String, Integer> jdbcTypes = columnJdbcTypes(connection, object, primaryKeyColumns);
+    try (PreparedStatement statement = connection.prepareStatement(deleteSql(connection, object, primaryKeyColumns))) {
+      for (List<Object> row : rows) {
+        for (int i = 0; i < row.size(); i += 1) {
+          int jdbcType = jdbcTypes.get(primaryKeyColumns.get(i));
+          bindInsertValue(statement, i + 1, row.get(i), jdbcType);
+        }
+        statement.addBatch();
+      }
+      int[] counts = statement.executeBatch();
+      for (int count : counts) {
+        if (count > 0) {
+          deletedRows += count;
+        } else if (count == Statement.SUCCESS_NO_INFO) {
+          deletedRows += 1;
+        }
+      }
+      connection.commit();
+      return Map.of("deletedRows", deletedRows);
+    } catch (SQLException error) {
+      connection.rollback();
+      throw error;
+    } finally {
+      connection.setAutoCommit(originalAutoCommit);
+    }
+  }
+
+  private static String deleteSql(Connection connection, DbObject object, List<String> primaryKeyColumns) throws SQLException {
+    StringBuilder sql = new StringBuilder("delete from ");
+    sql.append(qualifiedName(connection, object)).append(" where ");
+    for (int i = 0; i < primaryKeyColumns.size(); i += 1) {
+      if (i > 0) {
+        sql.append(" and ");
+      }
+      sql.append(quote(connection, primaryKeyColumns.get(i))).append(" = ?");
+    }
     return sql.toString();
   }
 

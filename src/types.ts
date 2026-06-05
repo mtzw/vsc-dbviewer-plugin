@@ -113,6 +113,10 @@ export interface InsertRowsResult {
   insertedRows: number;
 }
 
+export interface DeleteRowsResult {
+  deletedRows: number;
+}
+
 export type HelperAction =
   | "testConnection"
   | "listSchemas"
@@ -120,7 +124,8 @@ export type HelperAction =
   | "getObjectInfo"
   | "getObjectData"
   | "getObjectDdl"
-  | "insertRows";
+  | "insertRows"
+  | "deleteRows";
 
 export interface HelperConnection {
   jdbcUrl: string;
@@ -139,7 +144,8 @@ export interface HelperRequest {
   sortColumn?: string;
   sortDirection?: "ASC" | "DESC";
   columns?: string[];
-  rows?: Array<Array<string | null>>;
+  primaryKeyColumns?: string[];
+  rows?: Array<Array<string | number | boolean | null>>;
 }
 
 export interface HelperResponse<T> {

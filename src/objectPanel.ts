@@ -1,10 +1,11 @@
 import * as vscode from "vscode";
 import * as fs from "node:fs";
 import { toExportCsv, toExportTsv, toInsertSql, toTsv } from "./copyFormat";
+import { buildDeleteRowsPreview, DeleteRowsPreview } from "./deleteRows";
 import { JdbcClient } from "./jdbcClient";
 import { ProfileStore } from "./profileStore";
 import { buildTsvInsertPreview, TsvInsertPreview } from "./tsvInsert";
-import { DbObject, ObjectData, ObjectDdl, ObjectInfo, ConnectionProfile, InsertRowsResult } from "./types";
+import { DbObject, ObjectData, ObjectDdl, ObjectInfo, ConnectionProfile, DeleteRowsResult, InsertRowsResult } from "./types";
 
 type ExportFormat = "csv" | "tsv" | "insert";
 type SortDirection = "ASC" | "DESC";
@@ -46,7 +47,8 @@ export class ObjectPanel {
       const firstPage = await loadObjectData(client, profile, password, object, query, 0, DATA_PAGE_SIZE);
       let currentData = firstPage;
       let tsvInsertPreview: TsvInsertPreview | undefined;
-      panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "info", query, tsvInsertPreview);
+      let deleteRowsPreview: DeleteRowsPreview | undefined;
+      panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "info", query, tsvInsertPreview, deleteRowsPreview);
 
       panel.webview.onDidReceiveMessage(async (message: WebviewMessage) => {
         try {
@@ -61,34 +63,37 @@ export class ObjectPanel {
               offset: 0,
               hasPrevious: false
             };
-            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview);
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview);
             return;
           }
 
           if (message.type === "reload") {
             tsvInsertPreview = undefined;
+            deleteRowsPreview = undefined;
             currentData = await loadObjectData(client, profile, password, object, query, 0, currentData.limit);
-            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview);
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview);
             return;
           }
 
           if (message.type === "search") {
             tsvInsertPreview = undefined;
+            deleteRowsPreview = undefined;
             query = { ...query, where: message.where.trim() };
             currentData = await loadObjectData(client, profile, password, object, query, 0, currentData.limit);
-            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview);
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview);
             return;
           }
 
           if (message.type === "sort") {
             tsvInsertPreview = undefined;
+            deleteRowsPreview = undefined;
             query = {
               ...query,
               sortColumn: message.column,
               sortDirection: query.sortColumn === message.column && query.sortDirection === "ASC" ? "DESC" : "ASC"
             };
             currentData = await loadObjectData(client, profile, password, object, query, 0, currentData.limit);
-            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview);
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview);
             return;
           }
 
@@ -113,13 +118,14 @@ export class ObjectPanel {
 
           if (message.type === "previewTsvInsert") {
             tsvInsertPreview = buildTsvInsertPreview(object, info, message.tsv);
-            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview);
+            deleteRowsPreview = undefined;
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview);
             return;
           }
 
           if (message.type === "cancelTsvInsert") {
             tsvInsertPreview = undefined;
-            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview);
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview);
             return;
           }
 
@@ -136,7 +142,37 @@ export class ObjectPanel {
             vscode.window.showInformationMessage(`${result.insertedRows} row(s) inserted into ${object.name}.`);
             tsvInsertPreview = undefined;
             currentData = await loadObjectData(client, profile, password, object, query, 0, currentData.limit);
-            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview);
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview);
+            return;
+          }
+
+          if (message.type === "previewDeleteRows") {
+            deleteRowsPreview = buildDeleteRowsPreview(object, info, currentData, message.rowIndexes);
+            tsvInsertPreview = undefined;
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview);
+            return;
+          }
+
+          if (message.type === "cancelDeleteRows") {
+            deleteRowsPreview = undefined;
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview);
+            return;
+          }
+
+          if (message.type === "confirmDeleteRows") {
+            if (!deleteRowsPreview || deleteRowsPreview.errors.length > 0) {
+              vscode.window.showErrorMessage("削除プレビューを確認してください。");
+              return;
+            }
+            const result = await client.request<DeleteRowsResult>(profile, password, "deleteRows", {
+              object,
+              primaryKeyColumns: deleteRowsPreview.primaryKeyColumns,
+              rows: deleteRowsPreview.rows
+            });
+            vscode.window.showInformationMessage(`${result.deletedRows} row(s) deleted from ${object.name}.`);
+            deleteRowsPreview = undefined;
+            currentData = await loadObjectData(client, profile, password, object, query, 0, currentData.limit);
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview);
           }
         } catch (error) {
           vscode.window.showErrorMessage((error as Error).message);
@@ -157,7 +193,10 @@ type WebviewMessage =
   | { type: "export"; format: ExportFormat }
   | { type: "previewTsvInsert"; tsv: string }
   | { type: "cancelTsvInsert" }
-  | { type: "confirmTsvInsert" };
+  | { type: "confirmTsvInsert" }
+  | { type: "previewDeleteRows"; rowIndexes: number[] }
+  | { type: "cancelDeleteRows" }
+  | { type: "confirmDeleteRows" };
 
 async function loadObjectData(
   client: JdbcClient,
@@ -311,7 +350,8 @@ function renderObject(
   ddl: ObjectDdl,
   activeTab: "info" | "constraints" | "indexes" | "data" | "ddl",
   query: DataQuery,
-  tsvInsertPreview?: TsvInsertPreview
+  tsvInsertPreview?: TsvInsertPreview,
+  deleteRowsPreview?: DeleteRowsPreview
 ): string {
   const nonce = createNonce();
   const content = `
@@ -336,7 +376,7 @@ function renderObject(
     </section>
     <section id="data" class="panel ${activeTab === "data" ? "active" : ""}">
       <h2>Data <span class="muted">${data.rows.length} loaded</span></h2>
-      ${renderData(data, query, object, tsvInsertPreview)}
+      ${renderData(data, query, object, info, tsvInsertPreview, deleteRowsPreview)}
     </section>
     <section id="ddl" class="panel ${activeTab === "ddl" ? "active" : ""}">
       <h2>Definition SQL</h2>
@@ -363,6 +403,9 @@ function renderObject(
         const previewTsvInsert = document.querySelector("#preview-tsv-insert");
         const cancelTsvInsert = document.querySelector("#cancel-tsv-insert");
         const confirmTsvInsert = document.querySelector("#confirm-tsv-insert");
+        const previewDeleteRows = document.querySelector("#preview-delete-rows");
+        const cancelDeleteRows = document.querySelector("#cancel-delete-rows");
+        const confirmDeleteRows = document.querySelector("#confirm-delete-rows");
         const selectAll = document.querySelector("#select-all");
         const clearSelection = document.querySelector("#clear-selection");
         const loadStatus = document.querySelector("#load-status");
@@ -433,6 +476,15 @@ function renderObject(
         }
         if (confirmTsvInsert) {
           confirmTsvInsert.addEventListener("click", () => vscode.postMessage({ type: "confirmTsvInsert" }));
+        }
+        if (previewDeleteRows) {
+          previewDeleteRows.addEventListener("click", () => vscode.postMessage({ type: "previewDeleteRows", rowIndexes: selectedRows() }));
+        }
+        if (cancelDeleteRows) {
+          cancelDeleteRows.addEventListener("click", () => vscode.postMessage({ type: "cancelDeleteRows" }));
+        }
+        if (confirmDeleteRows) {
+          confirmDeleteRows.addEventListener("click", () => vscode.postMessage({ type: "confirmDeleteRows" }));
         }
         reloadData.addEventListener("click", () => vscode.postMessage({ type: "reload" }));
         applySearch.addEventListener("click", () => vscode.postMessage({ type: "search", where: whereInput.value }));
@@ -530,7 +582,14 @@ function renderIndexes(info: ObjectInfo): string {
   `;
 }
 
-function renderData(data: ObjectData, query: DataQuery, object: DbObject, tsvInsertPreview?: TsvInsertPreview): string {
+function renderData(
+  data: ObjectData,
+  query: DataQuery,
+  object: DbObject,
+  info: ObjectInfo,
+  tsvInsertPreview?: TsvInsertPreview,
+  deleteRowsPreview?: DeleteRowsPreview
+): string {
   const headers = data.columns.map((column) => {
     const active = query.sortColumn === column;
     const marker = active ? (query.sortDirection === "ASC" ? " ▲" : " ▼") : "";
@@ -570,17 +629,57 @@ function renderData(data: ObjectData, query: DataQuery, object: DbObject, tsvIns
       ${object.type === "TABLE" ? `
         <div class="toolbar-group">
           <button id="open-tsv-insert" type="button">Paste TSV Insert</button>
+          <button id="preview-delete-rows" type="button" ${info.primaryKeys.length === 0 ? "disabled" : ""}>Delete Selected</button>
         </div>
       ` : ""}
       <span class="toolbar-spacer"></span>
       <span class="muted">${data.rows.length} rows loaded</span>
     </div>
     ${object.type === "TABLE" ? renderTsvInsertModal(object, data, tsvInsertPreview) : ""}
+    ${object.type === "TABLE" ? renderDeleteRowsModal(object, deleteRowsPreview) : ""}
     <table>
       <thead><tr><th class="selector"></th>${headers}</tr></thead>
       <tbody>${body}</tbody>
     </table>
     <div id="load-status" class="load-status muted">${data.hasNext ? "末尾までスクロールすると追加ロードします。" : "すべての表示可能な行を読み込みました。"}</div>
+  `;
+}
+
+function renderDeleteRowsModal(object: DbObject, preview?: DeleteRowsPreview): string {
+  const activeClass = preview ? " active" : "";
+  const errors = preview?.errors ?? [];
+  const hasErrors = errors.length > 0;
+  const headers = preview?.primaryKeyColumns.map((column) => `<th>${escapeHtml(column)}</th>`).join("") ?? "";
+  const previewBody = preview && preview.previewRows.length > 0
+    ? preview.previewRows.map((row) => `
+      <tr>${row.map((value) => `<td>${escapeHtml(renderPreviewValue(value))}</td>`).join("")}</tr>
+    `).join("")
+    : `<tr><td class="muted">削除する行を選択してください。</td></tr>`;
+  const errorList = hasErrors
+    ? `<ul class="insert-errors">${errors.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}</ul>`
+    : "";
+  return `
+    <div id="delete-rows-modal" class="modal${activeClass}">
+      <div class="modal-dialog" role="dialog" aria-modal="true" aria-label="Delete Selected Rows Preview">
+        <h3>Delete Selected Rows</h3>
+        <div class="insert-summary">
+          <span>Target: ${escapeHtml(object.schema ? `${object.schema}.${object.name}` : object.name)}</span>
+          <span>Rows: ${preview?.rowCount ?? 0}</span>
+          <span>Primary Key: ${escapeHtml(preview?.primaryKeyColumns.join(", ") ?? "")}</span>
+        </div>
+        ${errorList}
+        <div class="preview-table">
+          <table>
+            <thead><tr>${headers}</tr></thead>
+            <tbody>${previewBody}</tbody>
+          </table>
+        </div>
+        <div class="modal-actions">
+          <button id="cancel-delete-rows" type="button">Cancel</button>
+          <button id="confirm-delete-rows" type="button" ${!preview || hasErrors ? "disabled" : ""}>Delete</button>
+        </div>
+      </div>
+    </div>
   `;
 }
 
@@ -626,11 +725,11 @@ function renderTsvInsertModal(object: DbObject, data: ObjectData, preview?: TsvI
   `;
 }
 
-function renderPreviewValue(value: string | null | undefined): string {
+function renderPreviewValue(value: string | number | boolean | null | undefined): string {
   if (value === null) {
     return "NULL";
   }
-  return value ?? "";
+  return value === undefined ? "" : String(value);
 }
 
 function shell(profile: ConnectionProfile, object: DbObject, body: string, nonce = ""): string {
