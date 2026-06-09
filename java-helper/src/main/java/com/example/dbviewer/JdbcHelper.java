@@ -444,12 +444,12 @@ public final class JdbcHelper {
     boolean originalAutoCommit = connection.getAutoCommit();
     connection.setAutoCommit(false);
     int insertedRows = 0;
-    Map<String, Integer> jdbcTypes = columnJdbcTypes(connection, object, columns);
+    Map<String, ColumnBinding> columnBindings = columnBindings(connection, object, columns);
     try (PreparedStatement statement = connection.prepareStatement(insertSql(connection, object, columns))) {
       for (List<Object> row : rows) {
         for (int i = 0; i < row.size(); i += 1) {
-          int jdbcType = jdbcTypes.get(columns.get(i));
-          bindInsertValue(statement, i + 1, row.get(i), jdbcType);
+          ColumnBinding binding = columnBindings.get(columns.get(i));
+          bindInsertValue(statement, i + 1, row.get(i), binding);
         }
         statement.addBatch();
       }
@@ -515,12 +515,12 @@ public final class JdbcHelper {
     boolean originalAutoCommit = connection.getAutoCommit();
     connection.setAutoCommit(false);
     int deletedRows = 0;
-    Map<String, Integer> jdbcTypes = columnJdbcTypes(connection, object, primaryKeyColumns);
+    Map<String, ColumnBinding> columnBindings = columnBindings(connection, object, primaryKeyColumns);
     try (PreparedStatement statement = connection.prepareStatement(deleteSql(connection, object, primaryKeyColumns))) {
       for (List<Object> row : rows) {
         for (int i = 0; i < row.size(); i += 1) {
-          int jdbcType = jdbcTypes.get(primaryKeyColumns.get(i));
-          bindInsertValue(statement, i + 1, row.get(i), jdbcType);
+          ColumnBinding binding = columnBindings.get(primaryKeyColumns.get(i));
+          bindInsertValue(statement, i + 1, row.get(i), binding);
         }
         statement.addBatch();
       }
@@ -586,12 +586,12 @@ public final class JdbcHelper {
     List<String> parameterColumns = new ArrayList<>();
     parameterColumns.addAll(updateColumns);
     parameterColumns.addAll(primaryKeyColumns);
-    Map<String, Integer> jdbcTypes = columnJdbcTypes(connection, object, parameterColumns);
+    Map<String, ColumnBinding> columnBindings = columnBindings(connection, object, parameterColumns);
     try (PreparedStatement statement = connection.prepareStatement(updateSql(connection, object, updateColumns, primaryKeyColumns))) {
       for (List<Object> row : rows) {
         for (int i = 0; i < row.size(); i += 1) {
-          int jdbcType = jdbcTypes.get(parameterColumns.get(i));
-          bindInsertValue(statement, i + 1, row.get(i), jdbcType);
+          ColumnBinding binding = columnBindings.get(parameterColumns.get(i));
+          bindInsertValue(statement, i + 1, row.get(i), binding);
         }
         statement.addBatch();
       }
@@ -632,47 +632,52 @@ public final class JdbcHelper {
     return sql.toString();
   }
 
-  private static Map<String, Integer> columnJdbcTypes(Connection connection, DbObject object, List<String> columns) throws SQLException {
+  private static Map<String, ColumnBinding> columnBindings(Connection connection, DbObject object, List<String> columns) throws SQLException {
     DatabaseMetaData metadata = connection.getMetaData();
-    Map<String, Integer> available = new HashMap<>();
+    Map<String, ColumnBinding> available = new HashMap<>();
     try (ResultSet rs = metadata.getColumns(null, object.schema(), object.name(), "%")) {
       while (rs.next()) {
         String name = rs.getString("COLUMN_NAME");
         int jdbcType = rs.getInt("DATA_TYPE");
         if (!rs.wasNull()) {
-          available.put(name, jdbcType);
-          available.put(name.toUpperCase(), jdbcType);
-          available.put(name.toLowerCase(), jdbcType);
+          ColumnBinding binding = new ColumnBinding(jdbcType, rs.getString("TYPE_NAME"));
+          available.put(name, binding);
+          available.put(name.toUpperCase(), binding);
+          available.put(name.toLowerCase(), binding);
         }
       }
     }
 
-    Map<String, Integer> result = new LinkedHashMap<>();
+    Map<String, ColumnBinding> result = new LinkedHashMap<>();
     for (String column : columns) {
-      Integer jdbcType = available.get(column);
-      if (jdbcType == null) {
+      ColumnBinding binding = available.get(column);
+      if (binding == null) {
         throw new SQLException("Column metadata is not available for insert column: " + column);
       }
-      result.put(column, jdbcType);
+      result.put(column, binding);
     }
     return result;
   }
 
-  private static void bindInsertValue(PreparedStatement statement, int parameterIndex, Object value, int jdbcType) throws SQLException {
+  private static void bindInsertValue(PreparedStatement statement, int parameterIndex, Object value, ColumnBinding binding) throws SQLException {
     if (value == null) {
-      statement.setNull(parameterIndex, jdbcType);
+      statement.setNull(parameterIndex, binding.jdbcType());
       return;
     }
     String text = String.valueOf(value);
     try {
-      statement.setObject(parameterIndex, typedInsertValue(text, jdbcType), jdbcType);
+      statement.setObject(parameterIndex, typedInsertValue(text, binding), binding.jdbcType());
     } catch (RuntimeException error) {
-      throw new SQLException("Value '" + text + "' cannot be converted for parameter " + parameterIndex + " (JDBC type " + jdbcType + ").", error);
+      throw new SQLException("Value '" + text + "' cannot be converted for parameter " + parameterIndex + " (JDBC type " + binding.jdbcType() + ", type " + binding.typeName() + ").", error);
     }
   }
 
-  private static Object typedInsertValue(String value, int jdbcType) {
-    return switch (jdbcType) {
+  private static Object typedInsertValue(String value, ColumnBinding binding) {
+    String typeName = binding.typeName() == null ? "" : binding.typeName().trim().toLowerCase();
+    if (typeName.equals("date")) {
+      return Date.valueOf(value);
+    }
+    return switch (binding.jdbcType()) {
       case Types.TINYINT, Types.SMALLINT, Types.INTEGER -> Integer.valueOf(value);
       case Types.BIGINT -> Long.valueOf(value);
       case Types.REAL, Types.FLOAT -> Float.valueOf(value);
@@ -872,6 +877,8 @@ public final class JdbcHelper {
   private record DbObject(String schema, String name, String type) {}
 
   private record ObjectInfoParts(List<Map<String, Object>> columns, List<String> primaryKeys) {}
+
+  private record ColumnBinding(int jdbcType, String typeName) {}
 
   private static final class Json {
     private final String source;

@@ -24,6 +24,14 @@ test("validates temporal values", () => {
   assert.equal(validateValue({ name: "CREATED_AT", jdbcType: 93, typeName: "TIMESTAMP", nullable: false }, "2026-06-09"), "日時はyyyy-mm-dd HH:mm:ssまたはyyyy-mm-ddTHH:mm:ss形式で入力してください。");
 });
 
+test("prefers DATE type name over TIMESTAMP JDBC type for temporal validation", () => {
+  const oracleDateLike = { name: "BUSINESS_DATE", jdbcType: 93, typeName: "DATE", nullable: false };
+
+  assert.equal(validateValue(oracleDateLike, "2026-06-09"), null);
+  assert.equal(validateValue(oracleDateLike, "2026-06-09 10:00:00"), "日付はyyyy-mm-dd形式で入力してください。");
+  assert.equal(updateInputType(oracleDateLike), "date");
+});
+
 test("validates nullability", () => {
   assert.equal(validateValue({ name: "NOTE", jdbcType: 12, typeName: "VARCHAR", nullable: true }, null), null);
   assert.equal(validateValue({ name: "NAME", jdbcType: 12, typeName: "VARCHAR", nullable: false }, null), "NULLは指定できません。");

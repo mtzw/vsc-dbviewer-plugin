@@ -58,6 +58,22 @@ test("validates TSV insert values by JDBC type and nullability", () => {
   ]);
 });
 
+test("validates date-like TSV insert values once when JDBC type is timestamp", () => {
+  const preview = buildTsvInsertPreview({
+    schema: "APP",
+    name: "EVENT",
+    type: "TABLE"
+  }, {
+    ...info,
+    columns: [
+      { name: "ID", typeName: "INTEGER", jdbcType: 4, size: 10, nullable: false, ordinal: 1, defaultValue: null, remarks: null },
+      { name: "BUSINESS_DATE", typeName: "DATE", jdbcType: 93, size: null, nullable: false, ordinal: 2, defaultValue: null, remarks: null }
+    ]
+  }, "1\t2026-06-09");
+
+  assert.deepEqual(preview.errors, []);
+});
+
 test("rejects TSV insert previews for views", () => {
   const preview = buildTsvInsertPreview({ ...table, type: "VIEW" }, { ...info, type: "VIEW" }, "1\tAlice\tmemo");
 

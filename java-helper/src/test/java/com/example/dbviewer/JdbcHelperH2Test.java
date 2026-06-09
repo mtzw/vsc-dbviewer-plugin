@@ -26,6 +26,7 @@ public final class JdbcHelperH2Test {
       statement.execute("insert into person (id, department_id, name, email) values (3, 1, 'Carol', 'carol@example.com')");
       statement.execute("create table tsv_import (id integer primary key, name varchar(40) not null, note varchar(80))");
       statement.execute("create table tsv_typed_import (id integer primary key, amount decimal(10, 2), active boolean)");
+      statement.execute("create table dated_import (id integer primary key, business_date date not null)");
       statement.execute("create view person_view as select id, name from person");
     }
 
@@ -106,6 +107,26 @@ public final class JdbcHelperH2Test {
     String typedImported = call("getObjectData", jdbcUrl, "{\"schema\":null,\"name\":\"TSV_TYPED_IMPORT\",\"type\":\"TABLE\"}", 100, 0);
     assertContains(typedImported, "[20,123.45,true]");
     assertContains(typedImported, "[21,0.50,false]");
+    String dateInserted = call(
+      "insertRows",
+      jdbcUrl,
+      "{\"schema\":null,\"name\":\"DATED_IMPORT\",\"type\":\"TABLE\"}",
+      100,
+      0,
+      ",\"columns\":[\"ID\",\"BUSINESS_DATE\"],\"rows\":[[\"30\",\"2026-06-09\"]]"
+    );
+    assertContains(dateInserted, "\"insertedRows\":1");
+    String dateUpdated = call(
+      "updateRows",
+      jdbcUrl,
+      "{\"schema\":null,\"name\":\"DATED_IMPORT\",\"type\":\"TABLE\"}",
+      100,
+      0,
+      ",\"updateColumns\":[\"BUSINESS_DATE\"],\"primaryKeyColumns\":[\"ID\"],\"rows\":[[\"2026-06-10\",30]]"
+    );
+    assertContains(dateUpdated, "\"updatedRows\":1");
+    String dateImported = call("getObjectData", jdbcUrl, "{\"schema\":null,\"name\":\"DATED_IMPORT\",\"type\":\"TABLE\"}", 100, 0);
+    assertContains(dateImported, "[30,\"2026-06-10\"]");
     String failed = callFailure(
       "insertRows",
       jdbcUrl,
