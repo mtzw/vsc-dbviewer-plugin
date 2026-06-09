@@ -76,6 +76,7 @@ public final class JdbcHelper {
         case "getObjectDdl" -> getObjectDdl(connection, object(request));
         case "insertRows" -> insertRows(connection, object(request), stringList(request.get("columns")), rowList(request.get("rows")));
         case "deleteRows" -> deleteRows(connection, object(request), stringList(request.get("primaryKeyColumns")), rowList(request.get("rows")));
+        case "updateRows" -> updateRows(connection, object(request), stringList(request.get("updateColumns")), stringList(request.get("primaryKeyColumns")), rowList(request.get("rows")));
         default -> throw new IllegalArgumentException("Unknown action: " + action);
       };
     }
@@ -544,6 +545,84 @@ public final class JdbcHelper {
   private static String deleteSql(Connection connection, DbObject object, List<String> primaryKeyColumns) throws SQLException {
     StringBuilder sql = new StringBuilder("delete from ");
     sql.append(qualifiedName(connection, object)).append(" where ");
+    for (int i = 0; i < primaryKeyColumns.size(); i += 1) {
+      if (i > 0) {
+        sql.append(" and ");
+      }
+      sql.append(quote(connection, primaryKeyColumns.get(i))).append(" = ?");
+    }
+    return sql.toString();
+  }
+
+  private static Map<String, Object> updateRows(
+    Connection connection,
+    DbObject object,
+    List<String> updateColumns,
+    List<String> primaryKeyColumns,
+    List<List<Object>> rows
+  ) throws SQLException {
+    if (isView(object)) {
+      throw new SQLException("Selected row update is available for tables only.");
+    }
+    if (updateColumns.isEmpty()) {
+      throw new SQLException("Update columns are required.");
+    }
+    if (primaryKeyColumns.isEmpty()) {
+      throw new SQLException("Primary key columns are required.");
+    }
+    if (rows.isEmpty()) {
+      throw new SQLException("Update rows are required.");
+    }
+    int expectedValues = updateColumns.size() + primaryKeyColumns.size();
+    for (int i = 0; i < rows.size(); i += 1) {
+      if (rows.get(i).size() != expectedValues) {
+        throw new SQLException("Row " + (i + 1) + " has " + rows.get(i).size() + " value(s), expected " + expectedValues + ".");
+      }
+    }
+
+    boolean originalAutoCommit = connection.getAutoCommit();
+    connection.setAutoCommit(false);
+    int updatedRows = 0;
+    List<String> parameterColumns = new ArrayList<>();
+    parameterColumns.addAll(updateColumns);
+    parameterColumns.addAll(primaryKeyColumns);
+    Map<String, Integer> jdbcTypes = columnJdbcTypes(connection, object, parameterColumns);
+    try (PreparedStatement statement = connection.prepareStatement(updateSql(connection, object, updateColumns, primaryKeyColumns))) {
+      for (List<Object> row : rows) {
+        for (int i = 0; i < row.size(); i += 1) {
+          int jdbcType = jdbcTypes.get(parameterColumns.get(i));
+          bindInsertValue(statement, i + 1, row.get(i), jdbcType);
+        }
+        statement.addBatch();
+      }
+      int[] counts = statement.executeBatch();
+      for (int count : counts) {
+        if (count > 0) {
+          updatedRows += count;
+        } else if (count == Statement.SUCCESS_NO_INFO) {
+          updatedRows += 1;
+        }
+      }
+      connection.commit();
+      return Map.of("updatedRows", updatedRows);
+    } catch (SQLException error) {
+      connection.rollback();
+      throw error;
+    } finally {
+      connection.setAutoCommit(originalAutoCommit);
+    }
+  }
+
+  private static String updateSql(Connection connection, DbObject object, List<String> updateColumns, List<String> primaryKeyColumns) throws SQLException {
+    StringBuilder sql = new StringBuilder("update ");
+    sql.append(qualifiedName(connection, object)).append(" set ");
+    for (int i = 0; i < updateColumns.size(); i += 1) {
+      if (i > 0) {
+        sql.append(", ");
+      }
+      sql.append(quote(connection, updateColumns.get(i))).append(" = ?");
+    }
+    sql.append(" where ");
     for (int i = 0; i < primaryKeyColumns.size(); i += 1) {
       if (i > 0) {
         sql.append(" and ");

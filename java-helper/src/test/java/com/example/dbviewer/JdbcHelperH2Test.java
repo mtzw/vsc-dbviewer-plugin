@@ -83,6 +83,17 @@ public final class JdbcHelperH2Test {
     assertContains(deleted, "\"deletedRows\":1");
     String afterDelete = call("getObjectData", jdbcUrl, "{\"schema\":null,\"name\":\"TSV_IMPORT\",\"type\":\"TABLE\"}", 100, 0);
     assertNotContains(afterDelete, "\"Eve\"");
+    String updated = call(
+      "updateRows",
+      jdbcUrl,
+      "{\"schema\":null,\"name\":\"TSV_IMPORT\",\"type\":\"TABLE\"}",
+      100,
+      0,
+      ",\"updateColumns\":[\"NAME\",\"NOTE\"],\"primaryKeyColumns\":[\"ID\"],\"rows\":[[\"David\",\"updated\",10]]"
+    );
+    assertContains(updated, "\"updatedRows\":1");
+    String afterUpdate = call("getObjectData", jdbcUrl, "{\"schema\":null,\"name\":\"TSV_IMPORT\",\"type\":\"TABLE\"}", 100, 0);
+    assertContains(afterUpdate, "[10,\"David\",\"updated\"]");
     String typedInserted = call(
       "insertRows",
       jdbcUrl,
@@ -113,6 +124,16 @@ public final class JdbcHelperH2Test {
     assertContains(failedDelete, "\"ok\":false");
     String departmentsAfterRollback = call("getObjectData", jdbcUrl, "{\"schema\":null,\"name\":\"DEPARTMENT\",\"type\":\"TABLE\"}", 100, 0);
     assertContains(departmentsAfterRollback, "[2,\"Sales\"]");
+    String failedUpdate = callFailure(
+      "updateRows",
+      jdbcUrl,
+      "{\"schema\":null,\"name\":\"PERSON\",\"type\":\"TABLE\"}",
+      ",\"updateColumns\":[\"EMAIL\"],\"primaryKeyColumns\":[\"ID\"],\"rows\":[[\"shared@example.com\",2],[\"shared@example.com\",3]]"
+    );
+    assertContains(failedUpdate, "\"ok\":false");
+    String peopleAfterRollback = call("getObjectData", jdbcUrl, "{\"schema\":null,\"name\":\"PERSON\",\"type\":\"TABLE\"}", 100, 0);
+    assertContains(peopleAfterRollback, "[2,1,\"Bob\",\"bob@example.com\"]");
+    assertContains(peopleAfterRollback, "[3,1,\"Carol\",\"carol@example.com\"]");
     System.out.println("Java helper H2 integration test passed.");
   }
 

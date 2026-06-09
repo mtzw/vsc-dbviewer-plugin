@@ -1,7 +1,7 @@
 {
   "name": "vsc-dbviewer-plugin",
   "displayName": "DB Viewer",
-  "description": "Read-only JDBC database viewer for VS Code and compatible editors.",
+  "description": "JDBC database viewer for VS Code and compatible editors.",
   "version": "0.2.4",
   "publisher": "mtzw",
   "repository": {
@@ -124,7 +124,7 @@
     "compile": "tsc -p .",
     "build:helper": "javac -d java-helper/build/classes java-helper/src/main/java/com/example/dbviewer/JdbcHelper.java",
     "build": "npm run compile && npm run build:helper",
-    "test": "npm run compile && node out/test/profileStore.test.js && node out/test/jdbcClient.test.js && node out/test/copyFormat.test.js && node out/test/tsvInsert.test.js && node out/test/deleteRows.test.js && node scripts/run-h2-test.js"
+    "test": "npm run compile && node out/test/profileStore.test.js && node out/test/jdbcClient.test.js && node out/test/copyFormat.test.js && node out/test/valueValidation.test.js && node out/test/tsvInsert.test.js && node out/test/deleteRows.test.js && node out/test/updateRows.test.js && node scripts/run-h2-test.js"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

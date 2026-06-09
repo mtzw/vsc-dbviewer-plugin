@@ -49,6 +49,15 @@ test("reports too many TSV columns before insert", () => {
   assert.deepEqual(preview.errors, ["Row 1: expected 3 column(s), got 4."]);
 });
 
+test("validates TSV insert values by JDBC type and nullability", () => {
+  const preview = buildTsvInsertPreview(table, info, "abc\tAlice\tmemo\n2\t\\N\tmemo");
+
+  assert.deepEqual(preview.errors, [
+    "Row 1 ID: 整数を入力してください。",
+    "Row 2 NAME: NULLは指定できません。"
+  ]);
+});
+
 test("rejects TSV insert previews for views", () => {
   const preview = buildTsvInsertPreview({ ...table, type: "VIEW" }, { ...info, type: "VIEW" }, "1\tAlice\tmemo");
 

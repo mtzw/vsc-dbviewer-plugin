@@ -1,4 +1,5 @@
 import { DbObject, ObjectInfo } from "./types";
+import { validateRowValues, validationColumns } from "./valueValidation";
 
 export interface TsvInsertPreview {
   object: DbObject;
@@ -44,6 +45,9 @@ export function buildTsvInsertPreview(object: DbObject, info: ObjectInfo, text: 
 
   if (object.type !== "TABLE") {
     errors.push("TSV InsertはTableのみ実行できます。");
+  }
+  if (errors.length === 0) {
+    errors.push(...validateRowValues(validationColumns(info.columns), rows, (rowIndex) => `Row ${rowIndex + 1}`));
   }
 
   return {

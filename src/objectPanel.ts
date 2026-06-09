@@ -5,7 +5,9 @@ import { buildDeleteRowsPreview, DeleteRowsPreview } from "./deleteRows";
 import { JdbcClient } from "./jdbcClient";
 import { ProfileStore } from "./profileStore";
 import { buildTsvInsertPreview, TsvInsertPreview } from "./tsvInsert";
-import { DbObject, ObjectData, ObjectDdl, ObjectInfo, ConnectionProfile, DeleteRowsResult, InsertRowsResult } from "./types";
+import { DbObject, ObjectData, ObjectDdl, ObjectInfo, ConnectionProfile, DeleteRowsResult, InsertRowsResult, UpdateRowsResult } from "./types";
+import { buildUpdateRowsPreview, UpdateRowsInput, UpdateRowsPreview } from "./updateRows";
+import { normalizeTemporalInputValue, updateInputType, validationColumns, ValidationColumn } from "./valueValidation";
 
 type ExportFormat = "csv" | "tsv" | "insert";
 type SortDirection = "ASC" | "DESC";
@@ -48,7 +50,8 @@ export class ObjectPanel {
       let currentData = firstPage;
       let tsvInsertPreview: TsvInsertPreview | undefined;
       let deleteRowsPreview: DeleteRowsPreview | undefined;
-      panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "info", query, tsvInsertPreview, deleteRowsPreview);
+      let updateRowsPreview: UpdateRowsPreview | undefined;
+      panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "info", query, tsvInsertPreview, deleteRowsPreview, updateRowsPreview);
 
       panel.webview.onDidReceiveMessage(async (message: WebviewMessage) => {
         try {
@@ -63,37 +66,40 @@ export class ObjectPanel {
               offset: 0,
               hasPrevious: false
             };
-            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview);
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview, updateRowsPreview);
             return;
           }
 
           if (message.type === "reload") {
             tsvInsertPreview = undefined;
             deleteRowsPreview = undefined;
+            updateRowsPreview = undefined;
             currentData = await loadObjectData(client, profile, password, object, query, 0, currentData.limit);
-            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview);
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview, updateRowsPreview);
             return;
           }
 
           if (message.type === "search") {
             tsvInsertPreview = undefined;
             deleteRowsPreview = undefined;
+            updateRowsPreview = undefined;
             query = { ...query, where: message.where.trim() };
             currentData = await loadObjectData(client, profile, password, object, query, 0, currentData.limit);
-            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview);
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview, updateRowsPreview);
             return;
           }
 
           if (message.type === "sort") {
             tsvInsertPreview = undefined;
             deleteRowsPreview = undefined;
+            updateRowsPreview = undefined;
             query = {
               ...query,
               sortColumn: message.column,
               sortDirection: query.sortColumn === message.column && query.sortDirection === "ASC" ? "DESC" : "ASC"
             };
             currentData = await loadObjectData(client, profile, password, object, query, 0, currentData.limit);
-            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview);
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview, updateRowsPreview);
             return;
           }
 
@@ -119,13 +125,14 @@ export class ObjectPanel {
           if (message.type === "previewTsvInsert") {
             tsvInsertPreview = buildTsvInsertPreview(object, info, message.tsv);
             deleteRowsPreview = undefined;
-            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview);
+            updateRowsPreview = undefined;
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview, updateRowsPreview);
             return;
           }
 
           if (message.type === "cancelTsvInsert") {
             tsvInsertPreview = undefined;
-            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview);
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview, updateRowsPreview);
             return;
           }
 
@@ -142,20 +149,21 @@ export class ObjectPanel {
             vscode.window.showInformationMessage(`${result.insertedRows} row(s) inserted into ${object.name}.`);
             tsvInsertPreview = undefined;
             currentData = await loadObjectData(client, profile, password, object, query, 0, currentData.limit);
-            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview);
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview, updateRowsPreview);
             return;
           }
 
           if (message.type === "previewDeleteRows") {
             deleteRowsPreview = buildDeleteRowsPreview(object, info, currentData, message.rowIndexes);
             tsvInsertPreview = undefined;
-            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview);
+            updateRowsPreview = undefined;
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview, updateRowsPreview);
             return;
           }
 
           if (message.type === "cancelDeleteRows") {
             deleteRowsPreview = undefined;
-            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview);
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview, updateRowsPreview);
             return;
           }
 
@@ -172,7 +180,39 @@ export class ObjectPanel {
             vscode.window.showInformationMessage(`${result.deletedRows} row(s) deleted from ${object.name}.`);
             deleteRowsPreview = undefined;
             currentData = await loadObjectData(client, profile, password, object, query, 0, currentData.limit);
-            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview);
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview, updateRowsPreview);
+            return;
+          }
+
+          if (message.type === "previewUpdateRows") {
+            updateRowsPreview = buildUpdateRowsPreview(object, info, currentData, message.rows);
+            tsvInsertPreview = undefined;
+            deleteRowsPreview = undefined;
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview, updateRowsPreview);
+            return;
+          }
+
+          if (message.type === "cancelUpdateRows") {
+            updateRowsPreview = undefined;
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview, updateRowsPreview);
+            return;
+          }
+
+          if (message.type === "confirmUpdateRows") {
+            if (!updateRowsPreview || updateRowsPreview.errors.length > 0) {
+              vscode.window.showErrorMessage("Updateプレビューを確認してください。");
+              return;
+            }
+            const result = await client.request<UpdateRowsResult>(profile, password, "updateRows", {
+              object,
+              updateColumns: updateRowsPreview.updateColumns,
+              primaryKeyColumns: updateRowsPreview.primaryKeyColumns,
+              rows: updateRowsPreview.rows.map((row) => [...row.values, ...row.primaryKeyValues])
+            });
+            vscode.window.showInformationMessage(`${result.updatedRows} row(s) updated in ${object.name}.`);
+            updateRowsPreview = undefined;
+            currentData = await loadObjectData(client, profile, password, object, query, 0, currentData.limit);
+            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query, tsvInsertPreview, deleteRowsPreview, updateRowsPreview);
           }
         } catch (error) {
           vscode.window.showErrorMessage((error as Error).message);
@@ -196,7 +236,10 @@ type WebviewMessage =
   | { type: "confirmTsvInsert" }
   | { type: "previewDeleteRows"; rowIndexes: number[] }
   | { type: "cancelDeleteRows" }
-  | { type: "confirmDeleteRows" };
+  | { type: "confirmDeleteRows" }
+  | { type: "previewUpdateRows"; rows: UpdateRowsInput[] }
+  | { type: "cancelUpdateRows" }
+  | { type: "confirmUpdateRows" };
 
 async function loadObjectData(
   client: JdbcClient,
@@ -351,7 +394,8 @@ function renderObject(
   activeTab: "info" | "constraints" | "indexes" | "data" | "ddl",
   query: DataQuery,
   tsvInsertPreview?: TsvInsertPreview,
-  deleteRowsPreview?: DeleteRowsPreview
+  deleteRowsPreview?: DeleteRowsPreview,
+  updateRowsPreview?: UpdateRowsPreview
 ): string {
   const nonce = createNonce();
   const content = `
@@ -376,7 +420,7 @@ function renderObject(
     </section>
     <section id="data" class="panel ${activeTab === "data" ? "active" : ""}">
       <h2>Data <span class="muted">${data.rows.length} loaded</span></h2>
-      ${renderData(data, query, object, info, tsvInsertPreview, deleteRowsPreview)}
+      ${renderData(data, query, object, info, tsvInsertPreview, deleteRowsPreview, updateRowsPreview)}
     </section>
     <section id="ddl" class="panel ${activeTab === "ddl" ? "active" : ""}">
       <h2>Definition SQL</h2>
@@ -406,6 +450,11 @@ function renderObject(
         const previewDeleteRows = document.querySelector("#preview-delete-rows");
         const cancelDeleteRows = document.querySelector("#cancel-delete-rows");
         const confirmDeleteRows = document.querySelector("#confirm-delete-rows");
+        const openUpdateRows = document.querySelector("#open-update-rows");
+        const updateRowsModal = document.querySelector("#update-rows-modal");
+        const previewUpdateRows = document.querySelector("#preview-update-rows");
+        const cancelUpdateRows = document.querySelector("#cancel-update-rows");
+        const confirmUpdateRows = document.querySelector("#confirm-update-rows");
         const selectAll = document.querySelector("#select-all");
         const clearSelection = document.querySelector("#clear-selection");
         const loadStatus = document.querySelector("#load-status");
@@ -424,6 +473,9 @@ function renderObject(
           selectedCount.textContent = String(count);
           copyTsv.disabled = count === 0;
           copyInsert.disabled = count === 0;
+          if (openUpdateRows) {
+            openUpdateRows.disabled = count === 0 || ${object.type === "TABLE" && info.primaryKeys.length > 0 ? "false" : "true"};
+          }
           for (const row of rows) {
             const check = row.querySelector(".row-check");
             row.classList.toggle("selected-row", Boolean(check && check.checked));
@@ -485,6 +537,39 @@ function renderObject(
         }
         if (confirmDeleteRows) {
           confirmDeleteRows.addEventListener("click", () => vscode.postMessage({ type: "confirmDeleteRows" }));
+        }
+        if (openUpdateRows && updateRowsModal) {
+          openUpdateRows.addEventListener("click", () => {
+            const selected = new Set(selectedRows());
+            for (const row of Array.from(updateRowsModal.querySelectorAll(".update-edit-row"))) {
+              row.classList.toggle("active", selected.has(Number(row.dataset.rowIndex)));
+            }
+            updateRowsModal.classList.add("active");
+          });
+        }
+        const updateInputRows = () => Array.from(document.querySelectorAll(".update-edit-row.active")).map((row) => ({
+          rowIndex: Number(row.dataset.rowIndex),
+          values: Array.from(row.querySelectorAll(".update-input")).map((input) => {
+            if (input.classList.contains("temporal-input") && input.value === "") {
+              return null;
+            }
+            if (input.dataset.temporalKind === "time" && /^\\d{2}:\\d{2}$/.test(input.value)) {
+              return input.value + ":00";
+            }
+            if (input.dataset.temporalKind === "datetime-local" && /^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}$/.test(input.value)) {
+              return input.value + ":00";
+            }
+            return input.value === "\\\\N" ? null : input.value;
+          })
+        }));
+        if (previewUpdateRows) {
+          previewUpdateRows.addEventListener("click", () => vscode.postMessage({ type: "previewUpdateRows", rows: updateInputRows() }));
+        }
+        if (cancelUpdateRows) {
+          cancelUpdateRows.addEventListener("click", () => vscode.postMessage({ type: "cancelUpdateRows" }));
+        }
+        if (confirmUpdateRows) {
+          confirmUpdateRows.addEventListener("click", () => vscode.postMessage({ type: "confirmUpdateRows" }));
         }
         reloadData.addEventListener("click", () => vscode.postMessage({ type: "reload" }));
         applySearch.addEventListener("click", () => vscode.postMessage({ type: "search", where: whereInput.value }));
@@ -588,7 +673,8 @@ function renderData(
   object: DbObject,
   info: ObjectInfo,
   tsvInsertPreview?: TsvInsertPreview,
-  deleteRowsPreview?: DeleteRowsPreview
+  deleteRowsPreview?: DeleteRowsPreview,
+  updateRowsPreview?: UpdateRowsPreview
 ): string {
   const headers = data.columns.map((column) => {
     const active = query.sortColumn === column;
@@ -629,6 +715,7 @@ function renderData(
       ${object.type === "TABLE" ? `
         <div class="toolbar-group">
           <button id="open-tsv-insert" type="button">Paste TSV Insert</button>
+          <button id="open-update-rows" type="button" ${info.primaryKeys.length === 0 ? "disabled" : ""}>Update Selected</button>
           <button id="preview-delete-rows" type="button" ${info.primaryKeys.length === 0 ? "disabled" : ""}>Delete Selected</button>
         </div>
       ` : ""}
@@ -637,6 +724,7 @@ function renderData(
     </div>
     ${object.type === "TABLE" ? renderTsvInsertModal(object, data, tsvInsertPreview) : ""}
     ${object.type === "TABLE" ? renderDeleteRowsModal(object, deleteRowsPreview) : ""}
+    ${object.type === "TABLE" ? renderUpdateRowsModal(object, data, info, updateRowsPreview) : ""}
     <table>
       <thead><tr><th class="selector"></th>${headers}</tr></thead>
       <tbody>${body}</tbody>
@@ -683,6 +771,90 @@ function renderDeleteRowsModal(object: DbObject, preview?: DeleteRowsPreview): s
   `;
 }
 
+function renderUpdateRowsModal(object: DbObject, data: ObjectData, info: ObjectInfo, preview?: UpdateRowsPreview): string {
+  const activeClass = preview ? " active" : "";
+  const errors = preview?.errors ?? [];
+  const hasErrors = errors.length > 0;
+  const primaryKeySet = new Set(info.primaryKeys.map((column) => column.toLowerCase()));
+  const inputColumns = data.columns.filter((column) => !primaryKeySet.has(column.toLowerCase()));
+  const validationColumnMap = new Map(validationColumns(info.columns).map((column) => [column.name.toLowerCase(), column]));
+  const selectedRowIndexes = new Set(preview?.rows.map((row) => row.rowIndex) ?? []);
+  const previewRowsByIndex = new Map(preview?.rows.map((row) => [row.rowIndex, row]) ?? []);
+  const editHeaders = [
+    ...info.primaryKeys.map((column) => `<th>${escapeHtml(column)}</th>`),
+    ...inputColumns.map((column) => `<th>${escapeHtml(column)}</th>`)
+  ].join("");
+  const editRows = data.rows.map((row, rowIndex) => {
+    const previewRow = previewRowsByIndex.get(rowIndex);
+    const active = selectedRowIndexes.has(rowIndex);
+    const primaryKeyCells = info.primaryKeys.map((column) => {
+      const columnIndex = findColumnIndex(data.columns, column);
+      return `<td>${escapeHtml(renderPreviewValue(row[columnIndex]))}</td>`;
+    }).join("");
+    const inputCells = inputColumns.map((column) => {
+      const columnIndex = findColumnIndex(data.columns, column);
+      const previewColumnIndex = preview?.updateColumns.indexOf(column) ?? -1;
+      const value = previewRow && previewColumnIndex >= 0 ? previewRow.values[previewColumnIndex] : row[columnIndex];
+      const validationColumn = validationColumnMap.get(column.toLowerCase());
+      return `<td>${renderUpdateInput(validationColumn, value)}</td>`;
+    }).join("");
+    return `<tr class="update-edit-row${active ? " active" : ""}" data-row-index="${rowIndex}">${primaryKeyCells}${inputCells}</tr>`;
+  }).join("");
+  const previewHeaders = preview
+    ? [
+      ...preview.primaryKeyColumns.map((column) => `<th>${escapeHtml(column)}</th>`),
+      ...preview.updateColumns.map((column) => `<th>${escapeHtml(column)}</th>`)
+    ].join("")
+    : "";
+  const previewBody = preview && preview.previewRows.length > 0 && preview.updateColumns.length > 0
+    ? preview.previewRows.map((row) => {
+      const primaryKeys = row.primaryKeyValues.map((value) => `<td>${escapeHtml(renderPreviewValue(value))}</td>`).join("");
+      const values = preview.updateColumns.map((_, index) => {
+        const previous = renderPreviewValue(row.previousValues[index]);
+        const next = renderPreviewValue(row.values[index]);
+        return `<td><span class="muted">${escapeHtml(previous)}</span> -> ${escapeHtml(next)}</td>`;
+      }).join("");
+      return `<tr>${primaryKeys}${values}</tr>`;
+    }).join("")
+    : `<tr><td class="muted">更新する行を選択し、値を変更してPreviewしてください。</td></tr>`;
+  const errorList = hasErrors
+    ? `<ul class="insert-errors">${errors.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}</ul>`
+    : "";
+  return `
+    <div id="update-rows-modal" class="modal${activeClass}">
+      <div class="modal-dialog" role="dialog" aria-modal="true" aria-label="Update Selected Rows Preview">
+        <h3>Update Selected Rows</h3>
+        <div class="insert-summary">
+          <span>Target: ${escapeHtml(object.schema ? `${object.schema}.${object.name}` : object.name)}</span>
+          <span>Rows: ${preview?.rowCount ?? 0}</span>
+          <span>Primary Key: ${escapeHtml(info.primaryKeys.join(", "))}</span>
+          <span>Changed Columns: ${escapeHtml(preview?.updateColumns.join(", ") ?? "")}</span>
+        </div>
+        <p class="muted">主キー列は更新対象外です。DATE / TIME / TIMESTAMP列は日付・時刻入力を使用します。日付・時刻入力は空欄、文字列入力は \\N をNULLとして扱います。</p>
+        ${errorList}
+        <div class="preview-table">
+          <table>
+            <thead><tr>${editHeaders}</tr></thead>
+            <tbody>${editRows || `<tr><td class="muted">表示中の行がありません。</td></tr>`}</tbody>
+          </table>
+        </div>
+        <h4>Preview</h4>
+        <div class="preview-table">
+          <table>
+            <thead><tr>${previewHeaders}</tr></thead>
+            <tbody>${previewBody}</tbody>
+          </table>
+        </div>
+        <div class="modal-actions">
+          <button id="cancel-update-rows" type="button">Cancel</button>
+          <button id="preview-update-rows" type="button">Preview</button>
+          <button id="confirm-update-rows" type="button" ${!preview || hasErrors ? "disabled" : ""}>Update</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function renderTsvInsertModal(object: DbObject, data: ObjectData, preview?: TsvInsertPreview): string {
   const activeClass = preview ? " active" : "";
   const errors = preview?.errors ?? [];
@@ -723,6 +895,34 @@ function renderTsvInsertModal(object: DbObject, data: ObjectData, preview?: TsvI
       </div>
     </div>
   `;
+}
+
+function renderUpdateInput(column: ValidationColumn | undefined, value: string | number | boolean | null | undefined): string {
+  if (!column) {
+    return `<input class="update-input" type="text" value="${escapeHtml(toTextInputValue(value))}" title="NULLにする場合は \\N を入力します">`;
+  }
+  const inputType = updateInputType(column);
+  if (inputType === "text") {
+    return `<input class="update-input" type="text" value="${escapeHtml(toTextInputValue(value))}" title="NULLにする場合は \\N を入力します">`;
+  }
+  const step = inputType === "time" || inputType === "datetime-local" ? " step=\"1\"" : "";
+  return `<input class="update-input temporal-input" type="${inputType}" data-temporal-kind="${inputType}" value="${escapeHtml(normalizeTemporalInputValue(column, value))}"${step} title="空欄にするとNULLとして扱います">`;
+}
+
+function toTextInputValue(value: string | number | boolean | null | undefined): string {
+  if (value === null || value === undefined) {
+    return "\\N";
+  }
+  return String(value);
+}
+
+function findColumnIndex(columns: string[], target: string): number {
+  const exact = columns.indexOf(target);
+  if (exact >= 0) {
+    return exact;
+  }
+  const normalizedTarget = target.toLowerCase();
+  return columns.findIndex((column) => column.toLowerCase() === normalizedTarget);
 }
 
 function renderPreviewValue(value: string | number | boolean | null | undefined): string {
@@ -774,8 +974,12 @@ function shell(profile: ConnectionProfile, object: DbObject, body: string, nonce
     .modal.active { display: flex; }
     .modal-dialog { background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35); max-height: 88vh; overflow: auto; padding: 16px; width: min(980px, calc(100vw - 36px)); }
     .modal-dialog h3 { font-size: 15px; margin: 0 0 10px; }
+    .modal-dialog h4 { font-size: 13px; margin: 14px 0 8px; }
     .insert-summary { color: var(--vscode-descriptionForeground); display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 10px; }
     #tsv-insert-input { background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border); color: var(--vscode-input-foreground); box-sizing: border-box; font-family: var(--vscode-editor-font-family); min-height: 140px; padding: 8px; width: 100%; }
+    .update-edit-row { display: none; }
+    .update-edit-row.active { display: table-row; }
+    .update-input { background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border); color: var(--vscode-input-foreground); box-sizing: border-box; min-width: 140px; padding: 5px 6px; width: 100%; }
     .insert-errors { color: var(--vscode-errorForeground); margin: 10px 0; padding-left: 20px; }
     .preview-table { margin-top: 10px; max-height: 320px; overflow: auto; }
     .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
