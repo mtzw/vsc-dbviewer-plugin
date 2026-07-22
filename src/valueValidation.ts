@@ -16,6 +16,10 @@ export function validationColumns(columns: ColumnInfo[]): ValidationColumn[] {
   }));
 }
 
+export function isWritableColumn(column: ColumnInfo): boolean {
+  return !column.autoIncrement && !column.generated;
+}
+
 export function validateRowValues(
   columns: ValidationColumn[],
   rows: Array<Array<string | null>>,

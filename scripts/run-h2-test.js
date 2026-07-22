@@ -22,8 +22,8 @@ const testClasses = path.join(root, "java-helper", "build", "test-classes");
 fs.mkdirSync(classes, { recursive: true });
 fs.mkdirSync(testClasses, { recursive: true });
 
-run("javac", ["-d", classes, mainSource]);
-run("javac", ["-cp", [classes, h2Jar].join(path.delimiter), "-d", testClasses, testSource]);
+run("javac", ["--release", "17", "-d", classes, mainSource]);
+run("javac", ["--release", "17", "-cp", [classes, h2Jar].join(path.delimiter), "-d", testClasses, testSource]);
 run("java", ["-cp", [testClasses, classes, h2Jar].join(path.delimiter), "com.example.dbviewer.JdbcHelperH2Test"]);
 
 function run(command, args) {

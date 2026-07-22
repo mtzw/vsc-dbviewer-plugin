@@ -14,8 +14,8 @@ const info: ObjectInfo = {
   name: "PERSON",
   type: "TABLE",
   columns: [
-    { name: "ID", typeName: "INTEGER", jdbcType: 4, size: 10, nullable: false, ordinal: 1, defaultValue: null, remarks: null },
-    { name: "NAME", typeName: "VARCHAR", jdbcType: 12, size: 40, nullable: false, ordinal: 2, defaultValue: null, remarks: null }
+    { name: "ID", typeName: "INTEGER", jdbcType: 4, size: 10, nullable: false, autoIncrement: false, generated: false, ordinal: 1, defaultValue: null, remarks: null },
+    { name: "NAME", typeName: "VARCHAR", jdbcType: 12, size: 40, nullable: false, autoIncrement: false, generated: false, ordinal: 2, defaultValue: null, remarks: null }
   ],
   primaryKeys: ["ID"],
   constraints: [],

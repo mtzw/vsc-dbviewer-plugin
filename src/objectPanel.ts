@@ -7,7 +7,7 @@ import { ProfileStore } from "./profileStore";
 import { buildTsvInsertPreview, TsvInsertPreview } from "./tsvInsert";
 import { DbObject, ObjectData, ObjectDdl, ObjectInfo, ConnectionProfile, DeleteRowsResult, InsertRowsResult, UpdateRowsResult } from "./types";
 import { buildUpdateRowsPreview, UpdateRowsInput, UpdateRowsPreview } from "./updateRows";
-import { normalizeTemporalInputValue, updateInputType, validationColumns, ValidationColumn } from "./valueValidation";
+import { isWritableColumn, normalizeTemporalInputValue, updateInputType, validationColumns, ValidationColumn } from "./valueValidation";
 
 type ExportFormat = "csv" | "tsv" | "insert";
 type SortDirection = "ASC" | "DESC";
@@ -611,13 +611,15 @@ function renderInfo(info: ObjectInfo): string {
       <td>${escapeHtml(column.typeName)}${column.size ? `(${column.size})` : ""}</td>
       <td>${column.nullable ? "YES" : "NO"}</td>
       <td>${primaryKeys.has(column.name) ? "YES" : ""}</td>
+      <td>${column.autoIncrement ? "YES" : ""}</td>
+      <td>${column.generated ? "YES" : ""}</td>
       <td>${escapeHtml(column.defaultValue ?? "")}</td>
       <td>${escapeHtml(column.remarks ?? "")}</td>
     </tr>
   `).join("");
   return `
     <table>
-      <thead><tr><th>Name</th><th>Type</th><th>Nullable</th><th>PK</th><th>Default</th><th>Remarks</th></tr></thead>
+      <thead><tr><th>Name</th><th>Type</th><th>Nullable</th><th>PK</th><th>Auto Increment</th><th>Generated</th><th>Default</th><th>Remarks</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
   `;
@@ -676,6 +678,7 @@ function renderData(
   deleteRowsPreview?: DeleteRowsPreview,
   updateRowsPreview?: UpdateRowsPreview
 ): string {
+  const writableColumns = info.columns.filter(isWritableColumn);
   const headers = data.columns.map((column) => {
     const active = query.sortColumn === column;
     const marker = active ? (query.sortDirection === "ASC" ? " ▲" : " ▼") : "";
@@ -714,7 +717,7 @@ function renderData(
       </div>
       ${object.type === "TABLE" ? `
         <div class="toolbar-group">
-          <button id="open-tsv-insert" type="button">Paste TSV Insert</button>
+          <button id="open-tsv-insert" type="button" ${writableColumns.length === 0 ? "disabled" : ""}>Paste TSV Insert</button>
           <button id="open-update-rows" type="button" ${info.primaryKeys.length === 0 ? "disabled" : ""}>Update Selected</button>
           <button id="preview-delete-rows" type="button" ${info.primaryKeys.length === 0 ? "disabled" : ""}>Delete Selected</button>
         </div>
@@ -722,7 +725,7 @@ function renderData(
       <span class="toolbar-spacer"></span>
       <span class="muted">${data.rows.length} rows loaded</span>
     </div>
-    ${object.type === "TABLE" ? renderTsvInsertModal(object, data, tsvInsertPreview) : ""}
+    ${object.type === "TABLE" ? renderTsvInsertModal(object, info, tsvInsertPreview) : ""}
     ${object.type === "TABLE" ? renderDeleteRowsModal(object, deleteRowsPreview) : ""}
     ${object.type === "TABLE" ? renderUpdateRowsModal(object, data, info, updateRowsPreview) : ""}
     <table>
@@ -776,7 +779,10 @@ function renderUpdateRowsModal(object: DbObject, data: ObjectData, info: ObjectI
   const errors = preview?.errors ?? [];
   const hasErrors = errors.length > 0;
   const primaryKeySet = new Set(info.primaryKeys.map((column) => column.toLowerCase()));
-  const inputColumns = data.columns.filter((column) => !primaryKeySet.has(column.toLowerCase()));
+  const writableColumnSet = new Set(info.columns.filter(isWritableColumn).map((column) => column.name.toLowerCase()));
+  const inputColumns = data.columns.filter((column) =>
+    !primaryKeySet.has(column.toLowerCase()) && writableColumnSet.has(column.toLowerCase())
+  );
   const validationColumnMap = new Map(validationColumns(info.columns).map((column) => [column.name.toLowerCase(), column]));
   const selectedRowIndexes = new Set(preview?.rows.map((row) => row.rowIndex) ?? []);
   const previewRowsByIndex = new Map(preview?.rows.map((row) => [row.rowIndex, row]) ?? []);
@@ -830,7 +836,7 @@ function renderUpdateRowsModal(object: DbObject, data: ObjectData, info: ObjectI
           <span>Primary Key: ${escapeHtml(info.primaryKeys.join(", "))}</span>
           <span>Changed Columns: ${escapeHtml(preview?.updateColumns.join(", ") ?? "")}</span>
         </div>
-        <p class="muted">主キー列は更新対象外です。DATE / TIME / TIMESTAMP列は日付・時刻入力を使用します。日付・時刻入力は空欄、文字列入力は \\N をNULLとして扱います。</p>
+        <p class="muted">主キー列と自動生成列は更新対象外です。DATE / TIME / TIMESTAMP列は日付・時刻入力を使用します。日付・時刻入力は空欄、文字列入力は \\N をNULLとして扱います。</p>
         ${errorList}
         <div class="preview-table">
           <table>
@@ -855,17 +861,18 @@ function renderUpdateRowsModal(object: DbObject, data: ObjectData, info: ObjectI
   `;
 }
 
-function renderTsvInsertModal(object: DbObject, data: ObjectData, preview?: TsvInsertPreview): string {
+function renderTsvInsertModal(object: DbObject, info: ObjectInfo, preview?: TsvInsertPreview): string {
   const activeClass = preview ? " active" : "";
   const errors = preview?.errors ?? [];
   const hasErrors = errors.length > 0;
   const previewRows = preview?.previewRows ?? [];
-  const previewHeaders = data.columns.map((column) => `<th>${escapeHtml(column)}</th>`).join("");
+  const columns = preview?.columns ?? info.columns.filter(isWritableColumn).map((column) => column.name);
+  const previewHeaders = columns.map((column) => `<th>${escapeHtml(column)}</th>`).join("");
   const previewBody = previewRows.length > 0
     ? previewRows.map((row) => `
-      <tr>${data.columns.map((_, index) => `<td>${escapeHtml(renderPreviewValue(row[index]))}</td>`).join("")}</tr>
+      <tr>${columns.map((_, index) => `<td>${escapeHtml(renderPreviewValue(row[index]))}</td>`).join("")}</tr>
     `).join("")
-    : `<tr><td colspan="${Math.max(data.columns.length, 1)}" class="muted">PreviewするTSVを入力してください。</td></tr>`;
+    : `<tr><td colspan="${Math.max(columns.length, 1)}" class="muted">PreviewするTSVを入力してください。</td></tr>`;
   const errorList = hasErrors
     ? `<ul class="insert-errors">${errors.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}</ul>`
     : "";
@@ -876,10 +883,10 @@ function renderTsvInsertModal(object: DbObject, data: ObjectData, preview?: TsvI
         <div class="insert-summary">
           <span>Target: ${escapeHtml(object.schema ? `${object.schema}.${object.name}` : object.name)}</span>
           <span>Rows: ${preview?.rowCount ?? 0}</span>
-          <span>Columns: ${data.columns.length}</span>
+          <span>Columns: ${columns.length}</span>
           <span>NULL: ${preview?.nullCount ?? 0}</span>
         </div>
-        <textarea id="tsv-insert-input" spellcheck="false" placeholder="テーブル列順のTSVを貼り付けます。空欄は空文字、\\NはNULLとして扱います。">${escapeHtml(preview?.sourceText ?? "")}</textarea>
+        <textarea id="tsv-insert-input" spellcheck="false" placeholder="書き込み可能な列順のTSVを貼り付けます。空欄は空文字、\\NはNULLとして扱います。">${escapeHtml(preview?.sourceText ?? "")}</textarea>
         ${errorList}
         <div class="preview-table">
           <table>

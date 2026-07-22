@@ -27,6 +27,13 @@ public final class JdbcHelperH2Test {
       statement.execute("create table tsv_import (id integer primary key, name varchar(40) not null, note varchar(80))");
       statement.execute("create table tsv_typed_import (id integer primary key, amount decimal(10, 2), active boolean)");
       statement.execute("create table dated_import (id integer primary key, business_date date not null)");
+      statement.execute("create table stable_paging (id integer primary key, name varchar(40))");
+      statement.execute("insert into stable_paging (id, name) values (3, 'Carol'), (1, 'Alice'), (2, 'Bob')");
+      statement.execute("create table unique_paging (code varchar(10) not null unique, name varchar(40))");
+      statement.execute("insert into unique_paging (code, name) values ('C', 'Carol'), ('A', 'Alice'), ('B', 'Bob')");
+      statement.execute("create table generated_data (key_id integer primary key, generated_id bigint auto_increment, name varchar(40))");
+      statement.execute("create table binary_data (id integer primary key, payload varbinary(4), item_uuid uuid, notes clob, attachment blob)");
+      statement.execute("insert into binary_data (id, payload, item_uuid, notes, attachment) values (1, X'0102A0FF', '12345678-1234-1234-1234-1234567890ab', 'hello', X'CAFE')");
       statement.execute("create view person_view as select id, name from person");
     }
 
@@ -41,6 +48,12 @@ public final class JdbcHelperH2Test {
     assertContains(info, "\"referencedTable\":\"DEPARTMENT\"");
     assertContains(info, "\"indexes\":[");
     assertContains(info, "\"name\":\"IX_PERSON_NAME\"");
+    assertContains(info, "\"autoIncrement\":false");
+    assertContains(info, "\"generated\":false");
+    String generatedInfo = call("getObjectInfo", jdbcUrl, "{\"schema\":null,\"name\":\"GENERATED_DATA\",\"type\":\"TABLE\"}");
+    assertContains(generatedInfo, "\"name\":\"GENERATED_ID\"");
+    assertContains(generatedInfo, "\"autoIncrement\":true");
+    assertContains(generatedInfo, "\"generated\":true");
     String viewInfo = call("getObjectInfo", jdbcUrl, "{\"schema\":null,\"name\":\"PERSON_VIEW\",\"type\":\"VIEW\"}");
     assertContains(viewInfo, "\"name\":\"PERSON_VIEW\"");
     assertContains(viewInfo, "\"primaryKeys\":[]");
@@ -60,6 +73,16 @@ public final class JdbcHelperH2Test {
     assertContains(paged, "\"hasPrevious\":true");
     assertContains(paged, "\"hasNext\":true");
     assertContains(paged, "\"Bob\"");
+    String stablePaged = call("getObjectData", jdbcUrl, "{\"schema\":null,\"name\":\"STABLE_PAGING\",\"type\":\"TABLE\"}", 1, 1);
+    assertContains(stablePaged, "\"rows\":[[2,\"Bob\"]]");
+    String uniquePaged = call("getObjectData", jdbcUrl, "{\"schema\":null,\"name\":\"UNIQUE_PAGING\",\"type\":\"TABLE\"}", 1, 1);
+    assertContains(uniquePaged, "\"rows\":[[\"B\",\"Bob\"]]");
+    String binaryData = call("getObjectData", jdbcUrl, "{\"schema\":null,\"name\":\"BINARY_DATA\",\"type\":\"TABLE\"}", 100, 0);
+    assertContains(binaryData, "\"base64:AQKg/w==\"");
+    assertContains(binaryData, "\"12345678-1234-1234-1234-1234567890ab\"");
+    assertContains(binaryData, "\"hello\"");
+    assertContains(binaryData, "\"base64:yv4=\"");
+    assertNotContains(binaryData, "[B@");
     assertContains(call("getObjectDdl", jdbcUrl, "{\"schema\":null,\"name\":\"PERSON\",\"type\":\"TABLE\"}", 100, 0), "CREATE TABLE");
     String inserted = call(
       "insertRows",
@@ -95,6 +118,29 @@ public final class JdbcHelperH2Test {
     assertContains(updated, "\"updatedRows\":1");
     String afterUpdate = call("getObjectData", jdbcUrl, "{\"schema\":null,\"name\":\"TSV_IMPORT\",\"type\":\"TABLE\"}", 100, 0);
     assertContains(afterUpdate, "[10,\"David\",\"updated\"]");
+    String generatedInserted = call(
+      "insertRows",
+      jdbcUrl,
+      "{\"schema\":null,\"name\":\"GENERATED_DATA\",\"type\":\"TABLE\"}",
+      100,
+      0,
+      ",\"columns\":[\"KEY_ID\",\"NAME\"],\"rows\":[[1,\"Generated\"]]"
+    );
+    assertContains(generatedInserted, "\"insertedRows\":1");
+    String generatedWriteFailure = callFailure(
+      "insertRows",
+      jdbcUrl,
+      "{\"schema\":null,\"name\":\"GENERATED_DATA\",\"type\":\"TABLE\"}",
+      ",\"columns\":[\"KEY_ID\",\"GENERATED_ID\",\"NAME\"],\"rows\":[[2,100,\"Rejected\"]]"
+    );
+    assertContains(generatedWriteFailure, "Insert cannot write generated column: GENERATED_ID");
+    String generatedUpdateFailure = callFailure(
+      "updateRows",
+      jdbcUrl,
+      "{\"schema\":null,\"name\":\"GENERATED_DATA\",\"type\":\"TABLE\"}",
+      ",\"updateColumns\":[\"GENERATED_ID\"],\"primaryKeyColumns\":[\"KEY_ID\"],\"rows\":[[100,1]]"
+    );
+    assertContains(generatedUpdateFailure, "Update cannot write generated column: GENERATED_ID");
     String typedInserted = call(
       "insertRows",
       jdbcUrl,
@@ -155,6 +201,24 @@ public final class JdbcHelperH2Test {
     String peopleAfterRollback = call("getObjectData", jdbcUrl, "{\"schema\":null,\"name\":\"PERSON\",\"type\":\"TABLE\"}", 100, 0);
     assertContains(peopleAfterRollback, "[2,1,\"Bob\",\"bob@example.com\"]");
     assertContains(peopleAfterRollback, "[3,1,\"Carol\",\"carol@example.com\"]");
+    String mismatchedDelete = callFailure(
+      "deleteRows",
+      jdbcUrl,
+      "{\"schema\":null,\"name\":\"TSV_IMPORT\",\"type\":\"TABLE\"}",
+      ",\"primaryKeyColumns\":[\"ID\"],\"rows\":[[10],[999]]"
+    );
+    assertContains(mismatchedDelete, "Delete affected 1 row(s), expected 2. The transaction was rolled back.");
+    String afterMismatchedDelete = call("getObjectData", jdbcUrl, "{\"schema\":null,\"name\":\"TSV_IMPORT\",\"type\":\"TABLE\"}", 100, 0);
+    assertContains(afterMismatchedDelete, "[10,\"David\",\"updated\"]");
+    String mismatchedUpdate = callFailure(
+      "updateRows",
+      jdbcUrl,
+      "{\"schema\":null,\"name\":\"TSV_IMPORT\",\"type\":\"TABLE\"}",
+      ",\"updateColumns\":[\"NAME\"],\"primaryKeyColumns\":[\"ID\"],\"rows\":[[\"Changed\",10],[\"Missing\",999]]"
+    );
+    assertContains(mismatchedUpdate, "Update affected 1 row(s), expected 2. The transaction was rolled back.");
+    String afterMismatchedUpdate = call("getObjectData", jdbcUrl, "{\"schema\":null,\"name\":\"TSV_IMPORT\",\"type\":\"TABLE\"}", 100, 0);
+    assertContains(afterMismatchedUpdate, "[10,\"David\",\"updated\"]");
     System.out.println("Java helper H2 integration test passed.");
   }
 

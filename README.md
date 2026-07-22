@@ -90,9 +90,44 @@ v1 では、SQL / TSV コピー、TSV 貼り付け Insert、Java Entity / Record
 - Update画面では、DATE列にカレンダー入力、TIME列に時刻入力、TIMESTAMP列に日時入力を使用します。
 - TIMESTAMP WITH TIME ZONEなどDB固有性が高い型は、v3.2.1では文字列入力のままとします。
 
+## v3.2.2 の改善点
+
+- Java helperをJava 17向けに固定してビルドし、配布先のJDK差異による起動失敗を防ぎます。
+- 主キーまたはUnique Indexを優先してデータ取得順を安定させ、追加ロードと全件エクスポートの重複・欠落を抑制します。
+- Identity、generated、computedなどの自動生成列をメタデータから判定します。
+- 自動生成列はTSV Insertと行Updateの入力対象から除外し、Java helperでも書き込みを拒否します。
+- BINARY / BLOBはBase64、CLOB / SQLXMLは文字列、UUIDは文字列表現へ正規化します。
+- Update / Deleteの要求件数と実行件数が一致しない場合は、処理全体をロールバックします。
+- ビルド前に以前の生成物を削除し、配布VSIXからテストコード、source map、Javaテストclassなどの不要物を除外します。
+
 ## ロードマップ
 
-- v3.3以降: Java Entity / Record生成機能を追加し、型マッピング、命名規則、package、JPA / Jakarta対応などを設定可能にします。
+### v3.3 Microsoft SQL Server対応
+
+- 接続プロファイルへMicrosoft SQL Serverを追加します。
+- JDBCドライバークラスは`com.microsoft.sqlserver.jdbc.SQLServerDriver`、JDBC URLは`jdbc:sqlserver://host:1433;databaseName=database;encrypt=true`形式を想定します。
+- JDBCドライバーJARは他のDBと同様に利用者が指定します。
+- 識別子の引用、ページング、Insert SQLリテラルなどのDB固有処理を方言単位に整理します。
+- `datetime2`、`datetimeoffset`、`money`、`uniqueidentifier`、`bit`、`nvarchar(max)`、`varbinary(max)`などを確認します。
+- SQL Serverの`timestamp` / `rowversion`は日時型ではなく自動生成列として扱います。
+- 実SQL Serverを使用し、メタデータ、データ取得、エクスポート、Insert、Update、Delete、rollbackを統合テストします。
+
+### v3.4 テーブル差分MVP
+
+- 対象スキーマとTableを選択して業務処理前のスナップショットを保存し、他アプリでの業務処理後に再取得して比較します。
+- 件数だけでは行数が変わらないUpdateを検出できないため、Tableごとに件数と内容フィンガープリントを比較します。
+- 主キーを取得できるTableでは、追加、削除、更新を行単位で分類します。
+- 主キーを取得できないTableでは、MVPは件数と内容変更の検出までとし、行単位差分は保証しません。
+- 全体サマリーとTable別差分をCSV / JSON形式で出力します。
+- スナップショットはVS Codeの拡張用保存領域に保存し、保存期間、削除、LOB / バイナリ列の除外、機微情報、容量上限を扱います。
+
+### v3.4.1 大規模データ対応
+
+- ストリーミング取得、チャンク単位ハッシュ、進捗、キャンセル、容量上限に対応します。
+- スナップショット途中失敗からの再開方法を検討します。
+- DB別にスナップショット取得中のデータ整合性と分離レベルを定義します。
+
+Java Entity / Record生成は現行ロードマップ外の候補です。v3.4.1までの安定化と差分機能を優先し、実装時期は定めていません。
 
 ## 開発手順
 
@@ -100,6 +135,8 @@ v1 では、SQL / TSV コピー、TSV 貼り付け Insert、Java Entity / Record
 npm install
 npm run build
 ```
+
+ソースからビルドする場合は、Node.js / npmに加えてJDK 17以上が必要です。Java helperは`javac --release 17`でビルドされ、実行環境にもJava 17以上が必要です。
 
 テストを実行する場合:
 
@@ -138,13 +175,13 @@ npm test
 4. VSIXを作成します。
 
 ```sh
-npx @vscode/vsce package
+npm run package:vsix
 ```
 
 作成に成功すると、プロジェクト直下に次のようなファイルが生成されます。
 
 ```text
-vsc-dbviewer-plugin-0.2.4.vsix
+vsc-dbviewer-plugin-{version}.vsix
 ```
 
 バージョン番号は `package.json` の `version` に従います。配布前にバージョンを上げる場合は、`package.json` を更新してから `npm install --package-lock-only` を実行し、`package-lock.json` も同期してください。
@@ -156,7 +193,8 @@ vsc-dbviewer-plugin-0.2.4.vsix
 コマンドラインからインストールする場合:
 
 ```sh
-code --install-extension vsc-dbviewer-plugin-0.2.4.vsix
+VSIX_PATH=/path/to/vsc-dbviewer-plugin-x.y.z.vsix
+code --install-extension "$VSIX_PATH"
 ```
 
 VS Code の画面からインストールする場合:
@@ -229,10 +267,10 @@ H2 の入力例:
 
 8. Table / View を開き、Webview 上で以下を確認します。
 
-- `情報`: カラム、型、Nullable、主キー、デフォルト値、備考
+- `情報`: カラム、型、Nullable、主キー、自動採番、自動生成、デフォルト値、備考
 - `制約`: 主キー、外部キー、Unique制約
 - `インデックス`: Index名、Unique、列、並び順、種別
-- `データ`: 最大 100 行の読み取り専用データ
+- `データ`: 初期表示は最大100行で、末尾付近までスクロールすると追加ロードします。Tableでは限定的なInsert / Update / Deleteも利用できます。
 - `定義SQL`: JDBC メタデータから生成できる範囲の定義SQL、または取得できない場合の補足メッセージ
 
 データタブでは、行チェックボックスを選択して以下の操作ができます。
@@ -255,7 +293,7 @@ H2 の入力例:
 `Paste TSV Insert` の確認手順:
 
 1. Tableの `データ` タブで `Paste TSV Insert` を押します。
-2. テーブル列順のTSVを貼り付けます。
+2. 情報タブの列順から自動生成列を除いた、書き込み可能な列順のTSVを貼り付けます。
 3. `Preview` を押し、対象テーブル、行数、列、先頭行、NULL件数、型やNULL可否の検証エラーを確認します。
 4. エラーが無い場合だけ `Insert` を押して投入します。
 5. 成功後、現在の検索条件とソート条件を維持したままデータが再読み込みされます。
@@ -272,7 +310,7 @@ H2 の入力例:
 
 1. Tableの `データ` タブで更新したい行を選択します。
 2. `Update Selected` を押します。
-3. 主キー以外の列を編集します。DATE / TIME / TIMESTAMP列は日付・時刻入力を使用できます。NULLにする場合、日付・時刻入力は空欄、文字列入力は `\N` を入力します。
+3. 主キーと自動生成列以外の列を編集します。DATE / TIME / TIMESTAMP列は日付・時刻入力を使用できます。NULLにする場合、日付・時刻入力は空欄、文字列入力は `\N` を入力します。
 4. `Preview` を押し、対象テーブル、更新行数、主キー列、変更列、変更前/変更後、型やNULL可否の検証エラーを確認します。
 5. エラーが無い場合だけ `Update` を押して更新します。
 6. 成功後、現在の検索条件とソート条件を維持したままデータが再読み込みされます。
@@ -280,6 +318,7 @@ H2 の入力例:
 ## 注意事項
 
 - JDBC ドライバーは同梱していません。利用する DB の JDBC ドライバー JAR を事前に用意してください。
+- Java helperの実行にはJava 17以上が必要です。
 - Oracle で `ORA-17056` が発生する場合は、接続編集で `ojdbc*.jar` に加えて `orai18n.jar` をサポートJARとして指定してください。
 - Table / View 一覧は、接続ユーザーの現在スキーマを対象に表示します。Oracle では通常、接続ユーザー所有の Table / View が対象です。
 - Java 実行環境が必要です。`java` コマンドが PATH から実行できる状態にしてください。
@@ -289,13 +328,15 @@ H2 の入力例:
 - `INSERT SQLコピー` の日付/時刻リテラルのRDB方言対応はベストエフォートです。OracleのDATE/TIMESTAMP向けリテラル生成はJDBC型情報に基づいて行います。
 - `INSERT SQL保存` はSQL文字列をファイルへ保存するだけです。Viewを対象にした場合、そのSQLがDBで実行可能であることは保証しません。
 - TSV InsertはTableのみ対象です。View、任意SQL実行には対応していません。
-- TSV Insertはヘッダ行を解釈しません。現在のテーブル列順と同じ順序で値を貼り付けてください。
+- TSV Insertはヘッダ行を解釈しません。情報タブの列順から自動生成列を除いた、書き込み可能な列順で値を貼り付けてください。
 - TSV Insertでは、空欄は空文字、`\N` はNULLとして扱います。改行を含むセルや引用符によるエスケープはv3.0では扱いません。
 - Insert / Updateの型チェックは、Java helperの型変換で受け付ける標準形式に合わせたPreview時の簡易検証です。
 - 選択行削除は、主キーを取得できるTableのみ対象です。Viewや主キーが無いTableでは実行できません。
-- 行Updateは、主キーを取得できるTableのみ対象です。主キー列の更新とView更新には対応していません。
+- 行Updateは、主キーを取得できるTableのみ対象です。主キー列、自動生成列の更新とView更新には対応していません。
 - TIMESTAMP WITH TIME ZONEなどDB固有性が高い日付時刻型は、v3.2.1では専用入力UIの対象外です。
 - 行Updateの同時更新検知はv3.2では主キー一致のみです。表示後に別ユーザーが同じ行を更新した場合、後から実行したUpdateで値を上書きする可能性があります。
 - データタブの検索条件はSQLのwhere句相当の条件式として扱います。セミコロンを含む条件式は指定できません。
 - 大量データのエクスポートは時間がかかる場合があります。キャンセルした場合、途中まで出力されたファイルが残ります。
+- 主キーとUnique Indexのどちらも取得できないTable / Viewでは、一意な並び順を決定できないため追加ロードや全件エクスポートの取得順を保証できません。
+- 自動テストはTypeScript単体テストとH2統合テストが中心です。Oracle、PostgreSQL、MySQLの実DB統合テストは未整備です。
 - DB側でTable / Viewを追加、削除した場合は、DB ViewerのRefreshを実行してツリーを更新してください。

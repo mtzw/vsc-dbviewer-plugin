@@ -1,10 +1,16 @@
 package com.example.dbviewer;
 
 import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
+import java.io.Reader;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.sql.Array;
+import java.sql.Blob;
+import java.sql.Clob;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.DriverManager;
@@ -13,12 +19,14 @@ import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.sql.SQLXML;
 import java.sql.Time;
 import java.sql.Timestamp;
 import java.sql.Types;
 import java.sql.Date;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -127,14 +135,21 @@ public final class JdbcHelper {
     List<Map<String, Object>> columns = new ArrayList<>();
     try (ResultSet rs = metadata.getColumns(null, object.schema(), object.name(), "%")) {
       while (rs.next()) {
+        String typeName = rs.getString("TYPE_NAME");
+        boolean autoIncrement = metadataFlag(rs, "IS_AUTOINCREMENT");
+        boolean generated = autoIncrement
+          || metadataFlag(rs, "IS_GENERATEDCOLUMN")
+          || isDatabaseGeneratedType(connection, typeName);
         Map<String, Object> column = new LinkedHashMap<>();
         column.put("name", rs.getString("COLUMN_NAME"));
-        column.put("typeName", rs.getString("TYPE_NAME"));
+        column.put("typeName", typeName);
         int jdbcType = rs.getInt("DATA_TYPE");
         column.put("jdbcType", rs.wasNull() ? null : jdbcType);
         int size = rs.getInt("COLUMN_SIZE");
         column.put("size", rs.wasNull() ? null : size);
         column.put("nullable", rs.getInt("NULLABLE") == DatabaseMetaData.columnNullable);
+        column.put("autoIncrement", autoIncrement);
+        column.put("generated", generated);
         column.put("ordinal", rs.getInt("ORDINAL_POSITION"));
         column.put("defaultValue", rs.getString("COLUMN_DEF"));
         column.put("remarks", rs.getString("REMARKS"));
@@ -299,19 +314,22 @@ public final class JdbcHelper {
   ) throws SQLException {
     int safeLimit = Math.max(1, Math.min(limit, 1000));
     int safeOffset = Math.max(0, offset);
-    String baseSql = dataSql(connection, object, where, sortColumn, sortDirection);
-    String sql = baseSql + " offset " + safeOffset + " rows fetch next " + (safeLimit + 1) + " rows only";
-    try (Statement statement = connection.createStatement()) {
-      try {
+    List<OrderColumn> orderColumns = stableOrderColumns(connection, object, sortColumn, sortDirection);
+    String baseSql = dataSql(connection, object, where, orderColumns);
+    String sql = paginatedSql(connection, baseSql, safeOffset, safeLimit + 1);
+    try {
+      try (Statement statement = connection.createStatement()) {
         return readRows(statement, sql, safeLimit, safeOffset, 0);
-      } catch (SQLException firstError) {
+      }
+    } catch (SQLException firstError) {
+      try (Statement statement = connection.createStatement()) {
         statement.setMaxRows(safeLimit + safeOffset + 1);
         return readRows(statement, baseSql, safeLimit, safeOffset, safeOffset);
       }
     }
   }
 
-  private static String dataSql(Connection connection, DbObject object, String where, String sortColumn, String sortDirection) throws SQLException {
+  private static String dataSql(Connection connection, DbObject object, String where, List<OrderColumn> orderColumns) throws SQLException {
     StringBuilder sql = new StringBuilder("select * from ").append(qualifiedName(connection, object));
     if (where != null && !where.isBlank()) {
       String condition = where.trim();
@@ -320,11 +338,74 @@ public final class JdbcHelper {
       }
       sql.append(" where ").append(condition);
     }
-    if (sortColumn != null && !sortColumn.isBlank()) {
-      sql.append(" order by ").append(quote(connection, sortColumn.trim()));
-      sql.append("DESC".equalsIgnoreCase(sortDirection) ? " DESC" : " ASC");
+    if (!orderColumns.isEmpty()) {
+      sql.append(" order by ");
+      for (int i = 0; i < orderColumns.size(); i += 1) {
+        if (i > 0) {
+          sql.append(", ");
+        }
+        OrderColumn orderColumn = orderColumns.get(i);
+        sql.append(quote(connection, orderColumn.name()));
+        sql.append(orderColumn.descending() ? " DESC" : " ASC");
+      }
     }
     return sql.toString();
+  }
+
+  private static List<OrderColumn> stableOrderColumns(
+    Connection connection,
+    DbObject object,
+    String sortColumn,
+    String sortDirection
+  ) throws SQLException {
+    Map<String, OrderColumn> columns = new LinkedHashMap<>();
+    if (sortColumn != null && !sortColumn.isBlank()) {
+      String name = sortColumn.trim();
+      columns.put(name.toLowerCase(), new OrderColumn(name, "DESC".equalsIgnoreCase(sortDirection)));
+    }
+
+    DatabaseMetaData metadata = connection.getMetaData();
+    List<String> stableColumns = new ArrayList<>();
+    for (Map<String, Object> row : safePrimaryKeys(metadata, object)) {
+      stableColumns.add(string(row.get("columnName")));
+    }
+    if (stableColumns.isEmpty()) {
+      stableColumns.addAll(firstUniqueIndexColumns(safeIndexes(metadata, object)));
+    }
+    for (String column : stableColumns) {
+      columns.putIfAbsent(column.toLowerCase(), new OrderColumn(column, false));
+    }
+    return new ArrayList<>(columns.values());
+  }
+
+  private static List<String> firstUniqueIndexColumns(List<Map<String, Object>> indexes) {
+    String selectedIndex = null;
+    List<String> columns = new ArrayList<>();
+    for (Map<String, Object> index : indexes) {
+      if (!Boolean.TRUE.equals(index.get("unique")) || index.get("columnName") == null) {
+        continue;
+      }
+      String indexName = string(index.get("name"));
+      if (indexName.isBlank()) {
+        continue;
+      }
+      if (selectedIndex == null) {
+        selectedIndex = indexName;
+      }
+      if (!selectedIndex.equals(indexName)) {
+        break;
+      }
+      columns.add(string(index.get("columnName")));
+    }
+    return columns;
+  }
+
+  private static String paginatedSql(Connection connection, String baseSql, int offset, int fetchRows) throws SQLException {
+    String productName = connection.getMetaData().getDatabaseProductName().toLowerCase();
+    if (productName.contains("mysql") || productName.contains("mariadb")) {
+      return baseSql + " limit " + fetchRows + " offset " + offset;
+    }
+    return baseSql + " offset " + offset + " rows fetch next " + fetchRows + " rows only";
   }
 
   private static Map<String, Object> readRows(Statement statement, String sql, int limit, int offset, int rowsToSkip) throws SQLException {
@@ -349,7 +430,7 @@ public final class JdbcHelper {
       while (rs.next()) {
         List<Object> row = new ArrayList<>();
         for (int i = 1; i <= metadata.getColumnCount(); i += 1) {
-          row.add(rs.getObject(i));
+          row.add(normalizeJdbcValue(rs.getObject(i)));
         }
         rows.add(row);
         if (rows.size() > limit) {
@@ -445,6 +526,7 @@ public final class JdbcHelper {
     connection.setAutoCommit(false);
     int insertedRows = 0;
     Map<String, ColumnBinding> columnBindings = columnBindings(connection, object, columns);
+    requireWritableColumns(columns, columnBindings, "Insert");
     try (PreparedStatement statement = connection.prepareStatement(insertSql(connection, object, columns))) {
       for (List<Object> row : rows) {
         for (int i = 0; i < row.size(); i += 1) {
@@ -453,14 +535,7 @@ public final class JdbcHelper {
         }
         statement.addBatch();
       }
-      int[] counts = statement.executeBatch();
-      for (int count : counts) {
-        if (count > 0) {
-          insertedRows += count;
-        } else if (count == Statement.SUCCESS_NO_INFO) {
-          insertedRows += 1;
-        }
-      }
+      insertedRows = affectedRowCount(statement.executeBatch());
       connection.commit();
       return Map.of("insertedRows", insertedRows);
     } catch (SQLException error) {
@@ -524,14 +599,8 @@ public final class JdbcHelper {
         }
         statement.addBatch();
       }
-      int[] counts = statement.executeBatch();
-      for (int count : counts) {
-        if (count > 0) {
-          deletedRows += count;
-        } else if (count == Statement.SUCCESS_NO_INFO) {
-          deletedRows += 1;
-        }
-      }
+      deletedRows = affectedRowCount(statement.executeBatch());
+      requireExpectedRowCount("Delete", rows.size(), deletedRows);
       connection.commit();
       return Map.of("deletedRows", deletedRows);
     } catch (SQLException error) {
@@ -587,6 +656,7 @@ public final class JdbcHelper {
     parameterColumns.addAll(updateColumns);
     parameterColumns.addAll(primaryKeyColumns);
     Map<String, ColumnBinding> columnBindings = columnBindings(connection, object, parameterColumns);
+    requireWritableColumns(updateColumns, columnBindings, "Update");
     try (PreparedStatement statement = connection.prepareStatement(updateSql(connection, object, updateColumns, primaryKeyColumns))) {
       for (List<Object> row : rows) {
         for (int i = 0; i < row.size(); i += 1) {
@@ -595,14 +665,8 @@ public final class JdbcHelper {
         }
         statement.addBatch();
       }
-      int[] counts = statement.executeBatch();
-      for (int count : counts) {
-        if (count > 0) {
-          updatedRows += count;
-        } else if (count == Statement.SUCCESS_NO_INFO) {
-          updatedRows += 1;
-        }
-      }
+      updatedRows = affectedRowCount(statement.executeBatch());
+      requireExpectedRowCount("Update", rows.size(), updatedRows);
       connection.commit();
       return Map.of("updatedRows", updatedRows);
     } catch (SQLException error) {
@@ -632,6 +696,26 @@ public final class JdbcHelper {
     return sql.toString();
   }
 
+  private static int affectedRowCount(int[] counts) throws SQLException {
+    int affectedRows = 0;
+    for (int count : counts) {
+      if (count > 0) {
+        affectedRows += count;
+      } else if (count == Statement.SUCCESS_NO_INFO) {
+        affectedRows += 1;
+      } else if (count == Statement.EXECUTE_FAILED) {
+        throw new SQLException("Batch execution failed.");
+      }
+    }
+    return affectedRows;
+  }
+
+  private static void requireExpectedRowCount(String operation, int expectedRows, int actualRows) throws SQLException {
+    if (actualRows != expectedRows) {
+      throw new SQLException(operation + " affected " + actualRows + " row(s), expected " + expectedRows + ". The transaction was rolled back.");
+    }
+  }
+
   private static Map<String, ColumnBinding> columnBindings(Connection connection, DbObject object, List<String> columns) throws SQLException {
     DatabaseMetaData metadata = connection.getMetaData();
     Map<String, ColumnBinding> available = new HashMap<>();
@@ -640,7 +724,12 @@ public final class JdbcHelper {
         String name = rs.getString("COLUMN_NAME");
         int jdbcType = rs.getInt("DATA_TYPE");
         if (!rs.wasNull()) {
-          ColumnBinding binding = new ColumnBinding(jdbcType, rs.getString("TYPE_NAME"));
+          String typeName = rs.getString("TYPE_NAME");
+          boolean autoIncrement = metadataFlag(rs, "IS_AUTOINCREMENT");
+          boolean generated = autoIncrement
+            || metadataFlag(rs, "IS_GENERATEDCOLUMN")
+            || isDatabaseGeneratedType(connection, typeName);
+          ColumnBinding binding = new ColumnBinding(jdbcType, typeName, generated);
           available.put(name, binding);
           available.put(name.toUpperCase(), binding);
           available.put(name.toLowerCase(), binding);
@@ -652,11 +741,24 @@ public final class JdbcHelper {
     for (String column : columns) {
       ColumnBinding binding = available.get(column);
       if (binding == null) {
-        throw new SQLException("Column metadata is not available for insert column: " + column);
+        throw new SQLException("Column metadata is not available: " + column);
       }
       result.put(column, binding);
     }
     return result;
+  }
+
+  private static void requireWritableColumns(
+    List<String> columns,
+    Map<String, ColumnBinding> bindings,
+    String operation
+  ) throws SQLException {
+    for (String column : columns) {
+      ColumnBinding binding = bindings.get(column);
+      if (binding != null && binding.generated()) {
+        throw new SQLException(operation + " cannot write generated column: " + column);
+      }
+    }
   }
 
   private static void bindInsertValue(PreparedStatement statement, int parameterIndex, Object value, ColumnBinding binding) throws SQLException {
@@ -699,6 +801,51 @@ public final class JdbcHelper {
       case "false", "f", "0", "no", "n" -> Boolean.FALSE;
       default -> throw new IllegalArgumentException("Invalid boolean value: " + value);
     };
+  }
+
+  private static Object normalizeJdbcValue(Object value) throws SQLException {
+    if (value == null) {
+      return null;
+    }
+    if (value instanceof byte[] bytes) {
+      return "base64:" + Base64.getEncoder().encodeToString(bytes);
+    }
+    if (value instanceof Blob blob) {
+      try (InputStream input = blob.getBinaryStream()) {
+        return "base64:" + Base64.getEncoder().encodeToString(input.readAllBytes());
+      } catch (IOException error) {
+        throw new SQLException("Failed to read BLOB value.", error);
+      }
+    }
+    if (value instanceof Clob clob) {
+      try (Reader reader = clob.getCharacterStream()) {
+        StringBuilder text = new StringBuilder();
+        char[] buffer = new char[8192];
+        int count;
+        while ((count = reader.read(buffer)) >= 0) {
+          text.append(buffer, 0, count);
+        }
+        return text.toString();
+      } catch (IOException error) {
+        throw new SQLException("Failed to read CLOB value.", error);
+      }
+    }
+    if (value instanceof SQLXML xml) {
+      return xml.getString();
+    }
+    if (value instanceof Array array) {
+      return normalizeArray(array.getArray());
+    }
+    return value;
+  }
+
+  private static List<Object> normalizeArray(Object value) throws SQLException {
+    int length = java.lang.reflect.Array.getLength(value);
+    List<Object> items = new ArrayList<>(length);
+    for (int i = 0; i < length; i += 1) {
+      items.add(normalizeJdbcValue(java.lang.reflect.Array.get(value, i)));
+    }
+    return items;
   }
 
   private static ObjectInfoParts objectInfoParts(Connection connection, DbObject object) throws SQLException {
@@ -778,6 +925,23 @@ public final class JdbcHelper {
       schema = schema.substring(0, at);
     }
     return schema.isBlank() ? null : schema;
+  }
+
+  private static boolean metadataFlag(ResultSet rs, String columnName) {
+    try {
+      return "YES".equalsIgnoreCase(rs.getString(columnName));
+    } catch (SQLException ignored) {
+      return false;
+    }
+  }
+
+  private static boolean isDatabaseGeneratedType(Connection connection, String typeName) throws SQLException {
+    String normalizedType = typeName == null ? "" : typeName.trim().toLowerCase();
+    if (normalizedType.equals("rowversion")) {
+      return true;
+    }
+    String productName = connection.getMetaData().getDatabaseProductName().toLowerCase();
+    return productName.contains("microsoft sql server") && normalizedType.equals("timestamp");
   }
 
   private static DbObject object(Map<String, Object> request) {
@@ -878,7 +1042,9 @@ public final class JdbcHelper {
 
   private record ObjectInfoParts(List<Map<String, Object>> columns, List<String> primaryKeys) {}
 
-  private record ColumnBinding(int jdbcType, String typeName) {}
+  private record ColumnBinding(int jdbcType, String typeName, boolean generated) {}
+
+  private record OrderColumn(String name, boolean descending) {}
 
   private static final class Json {
     private final String source;

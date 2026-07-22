@@ -1,5 +1,5 @@
 import { DbObject, ObjectData, ObjectInfo } from "./types";
-import { validateRowValues, validationColumns } from "./valueValidation";
+import { isWritableColumn, validateRowValues, validationColumns } from "./valueValidation";
 
 export type CellValue = string | number | boolean | null;
 
@@ -37,7 +37,14 @@ export function buildUpdateRowsPreview(
   const primaryKeyColumns = info.primaryKeys;
   const primaryKeyIndexes = primaryKeyColumns.map((column) => findColumnIndex(data.columns, column));
   const primaryKeySet = new Set(primaryKeyColumns.map((column) => column.toLowerCase()));
-  const inputColumns = data.columns.filter((column) => !primaryKeySet.has(column.toLowerCase()));
+  const writableColumnSet = new Set(
+    info.columns
+      .filter(isWritableColumn)
+      .map((column) => column.name.toLowerCase())
+  );
+  const inputColumns = data.columns.filter((column) =>
+    !primaryKeySet.has(column.toLowerCase()) && writableColumnSet.has(column.toLowerCase())
+  );
   const inputColumnIndexes = inputColumns.map((column) => findColumnIndex(data.columns, column));
   const errors: string[] = [];
 

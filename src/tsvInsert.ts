@@ -1,5 +1,5 @@
 import { DbObject, ObjectInfo } from "./types";
-import { validateRowValues, validationColumns } from "./valueValidation";
+import { isWritableColumn, validateRowValues, validationColumns } from "./valueValidation";
 
 export interface TsvInsertPreview {
   object: DbObject;
@@ -15,7 +15,8 @@ export interface TsvInsertPreview {
 const PREVIEW_ROW_LIMIT = 20;
 
 export function buildTsvInsertPreview(object: DbObject, info: ObjectInfo, text: string): TsvInsertPreview {
-  const columns = info.columns.map((column) => column.name);
+  const writableColumns = info.columns.filter(isWritableColumn);
+  const columns = writableColumns.map((column) => column.name);
   const rawRows = text
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n")
@@ -46,8 +47,11 @@ export function buildTsvInsertPreview(object: DbObject, info: ObjectInfo, text: 
   if (object.type !== "TABLE") {
     errors.push("TSV InsertはTableのみ実行できます。");
   }
+  if (columns.length === 0) {
+    errors.push("Insert可能な列がありません。");
+  }
   if (errors.length === 0) {
-    errors.push(...validateRowValues(validationColumns(info.columns), rows, (rowIndex) => `Row ${rowIndex + 1}`));
+    errors.push(...validateRowValues(validationColumns(writableColumns), rows, (rowIndex) => `Row ${rowIndex + 1}`));
   }
 
   return {

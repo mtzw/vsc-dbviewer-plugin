@@ -3,7 +3,11 @@ src/**
 test/**
 java-helper/src/**
 java-helper/build/**/*.java
-*.map
+java-helper/build/test-classes/**
+out/test/**
+out/**/*.map
+scripts/**
 tsconfig.json
 .drivers/**
 PLAN.md
+.gitignore

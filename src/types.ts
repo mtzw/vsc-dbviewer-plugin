@@ -45,6 +45,8 @@ export interface ColumnInfo {
   jdbcType: number | null;
   size: number | null;
   nullable: boolean;
+  autoIncrement: boolean;
+  generated: boolean;
   ordinal: number;
   defaultValue: string | null;
   remarks: string | null;

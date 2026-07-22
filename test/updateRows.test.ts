@@ -14,9 +14,9 @@ const info: ObjectInfo = {
   name: "PERSON",
   type: "TABLE",
   columns: [
-    { name: "ID", typeName: "INTEGER", jdbcType: 4, size: 10, nullable: false, ordinal: 1, defaultValue: null, remarks: null },
-    { name: "NAME", typeName: "VARCHAR", jdbcType: 12, size: 40, nullable: false, ordinal: 2, defaultValue: null, remarks: null },
-    { name: "NOTE", typeName: "VARCHAR", jdbcType: 12, size: 80, nullable: true, ordinal: 3, defaultValue: null, remarks: null }
+    { name: "ID", typeName: "INTEGER", jdbcType: 4, size: 10, nullable: false, autoIncrement: false, generated: false, ordinal: 1, defaultValue: null, remarks: null },
+    { name: "NAME", typeName: "VARCHAR", jdbcType: 12, size: 40, nullable: false, autoIncrement: false, generated: false, ordinal: 2, defaultValue: null, remarks: null },
+    { name: "NOTE", typeName: "VARCHAR", jdbcType: 12, size: 80, nullable: true, autoIncrement: false, generated: false, ordinal: 3, defaultValue: null, remarks: null }
   ],
   primaryKeys: ["ID"],
   constraints: [],
@@ -103,9 +103,9 @@ test("validates update values by JDBC type and nullability", () => {
   const typedInfo: ObjectInfo = {
     ...info,
     columns: [
-      { name: "ID", typeName: "INTEGER", jdbcType: 4, size: 10, nullable: false, ordinal: 1, defaultValue: null, remarks: null },
-      { name: "AMOUNT", typeName: "DECIMAL", jdbcType: 3, size: 10, nullable: false, ordinal: 2, defaultValue: null, remarks: null },
-      { name: "CREATED_AT", typeName: "TIMESTAMP", jdbcType: 93, size: null, nullable: false, ordinal: 3, defaultValue: null, remarks: null }
+      { name: "ID", typeName: "INTEGER", jdbcType: 4, size: 10, nullable: false, autoIncrement: false, generated: false, ordinal: 1, defaultValue: null, remarks: null },
+      { name: "AMOUNT", typeName: "DECIMAL", jdbcType: 3, size: 10, nullable: false, autoIncrement: false, generated: false, ordinal: 2, defaultValue: null, remarks: null },
+      { name: "CREATED_AT", typeName: "TIMESTAMP", jdbcType: 93, size: null, nullable: false, autoIncrement: false, generated: false, ordinal: 3, defaultValue: null, remarks: null }
     ]
   };
   const typedData: ObjectData = {
@@ -127,4 +127,33 @@ test("validates update values by JDBC type and nullability", () => {
     "Row 1 AMOUNT: 数値を入力してください。",
     "Row 1 CREATED_AT: 日時はyyyy-mm-dd HH:mm:ssまたはyyyy-mm-ddTHH:mm:ss形式で入力してください。"
   ]);
+});
+
+test("excludes generated columns from update inputs", () => {
+  const generatedInfo: ObjectInfo = {
+    ...info,
+    columns: [
+      info.columns[0],
+      info.columns[1],
+      { ...info.columns[2], name: "ROW_VERSION", generated: true }
+    ]
+  };
+  const generatedData: ObjectData = {
+    ...data,
+    columns: ["ID", "NAME", "ROW_VERSION"],
+    columnTypes: [
+      data.columnTypes[0],
+      data.columnTypes[1],
+      { name: "ROW_VERSION", typeName: "ROWVERSION", jdbcType: -2 }
+    ],
+    rows: [[1, "Alice", "base64:AAAAAA=="]]
+  };
+
+  const preview = buildUpdateRowsPreview(table, generatedInfo, generatedData, [
+    { rowIndex: 0, values: ["Alicia"] }
+  ]);
+
+  assert.deepEqual(preview.inputColumns, ["NAME"]);
+  assert.deepEqual(preview.updateColumns, ["NAME"]);
+  assert.deepEqual(preview.errors, []);
 });
