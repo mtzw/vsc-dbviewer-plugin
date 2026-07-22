@@ -2,7 +2,7 @@
   "name": "vsc-dbviewer-plugin",
   "displayName": "DB Viewer",
   "description": "JDBC database viewer for VS Code and compatible editors.",
-  "version": "3.3.0",
+  "version": "3.4.1",
   "publisher": "mtzw",
   "repository": {
     "type": "git",
@@ -127,7 +127,7 @@
     "build": "npm run clean && npm run compile && npm run build:helper",
     "package:vsix": "npx @vscode/vsce package --no-dependencies",
     "test:sqlserver": "node scripts/run-sqlserver-test.js",
-    "test": "npm run compile && node out/test/profileStore.test.js && node out/test/jdbcClient.test.js && node out/test/databaseTypes.test.js && node out/test/copyFormat.test.js && node out/test/valueValidation.test.js && node out/test/tsvInsert.test.js && node out/test/deleteRows.test.js && node out/test/updateRows.test.js && node scripts/run-h2-test.js"
+    "test": "npm run compile && node out/test/profileStore.test.js && node out/test/jdbcClient.test.js && node out/test/databaseTypes.test.js && node out/test/copyFormat.test.js && node out/test/valueValidation.test.js && node out/test/tsvInsert.test.js && node out/test/deleteRows.test.js && node out/test/updateRows.test.js && node out/test/tableDiff.test.js && node out/test/snapshotStore.test.js && node out/test/snapshotComparison.test.js && node out/test/diffView.test.js && node scripts/run-h2-test.js"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
