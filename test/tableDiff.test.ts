@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { compareTableSnapshotMetadata, compareTableSnapshots, createTableSnapshot, tableDiffToCsv } from "../src/tableDiff";
+import { compareTableSnapshotMetadata, compareTableSnapshots, createTableSnapshot, tableDiffToCsv, tableDiffToJson } from "../src/tableDiff";
 import { DbObject, ObjectData, ObjectInfo } from "../src/types";
 
 const object: DbObject = { schema: "APP", name: "PERSON", type: "TABLE" };
@@ -137,4 +137,16 @@ test("reports detail limit when large changed snapshots are summary-only", () =>
   assert.equal(diff.changed, true);
   assert.equal(diff.rowClassificationAvailable, false);
   assert.equal(diff.rowClassificationReason, "detail-limit");
+});
+
+test("exports the detail-limit reason in JSON and CSV summaries", () => {
+  const before = createTableSnapshot(profile, object, info, data([[1, "Alice", null]]));
+  const after = createTableSnapshot(profile, object, info, data([[1, "Alicia", null]]));
+  const diff = compareTableSnapshotMetadata(before, after, "detail-limit");
+
+  const json = JSON.parse(tableDiffToJson(diff)) as { rowClassificationReason: string };
+  const csv = tableDiffToCsv(diff);
+
+  assert.equal(json.rowClassificationReason, "detail-limit");
+  assert.match(csv, /SUMMARY.*detail-limit/);
 });

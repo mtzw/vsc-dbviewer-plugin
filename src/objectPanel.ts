@@ -5,9 +5,10 @@ import { buildDeleteRowsPreview, DeleteRowsPreview } from "./deleteRows";
 import { DEFAULT_DIFF_VIEW_QUERY, DiffStatusFilter, DiffViewQuery, getDiffRow, selectDiffViewPage } from "./diffView";
 import { JdbcClient } from "./jdbcClient";
 import { ProfileStore } from "./profileStore";
+import { captureChunkedTableSnapshot } from "./snapshotCapture";
 import { compareStoredSnapshots } from "./snapshotComparison";
 import { SnapshotStore } from "./snapshotStore";
-import { createTableSnapshot, SnapshotDescriptor, TableDiff, TableSnapshotMetadata, tableDiffToCsv, tableDiffToJson } from "./tableDiff";
+import { SnapshotDescriptor, TableDiff, tableDiffToCsv, tableDiffToJson } from "./tableDiff";
 import { buildTsvInsertPreview, TsvInsertPreview } from "./tsvInsert";
 import { DbObject, ObjectData, ObjectDdl, ObjectInfo, ConnectionProfile, DeleteRowsResult, InsertRowsResult, UpdateRowsResult } from "./types";
 import { buildUpdateRowsPreview, UpdateRowsInput, UpdateRowsPreview } from "./updateRows";
@@ -454,76 +455,35 @@ async function captureTableSnapshot(
     },
     async (progress, token) => {
       const currentInfo = await client.request<ObjectInfo>(profile, password, "getObjectInfo", { object });
-      let offset = 0;
-      let writer: Awaited<ReturnType<SnapshotStore["beginChunkedSnapshot"]>> | undefined;
-      let template: TableSnapshotMetadata | undefined;
       const snapshotQuery: DataQuery = {
         where: "",
         sortColumn: null,
         sortDirection: "ASC"
       };
 
-      try {
-        while (!token.isCancellationRequested) {
-          const page = await loadObjectData(client, profile, password, object, snapshotQuery, offset, SNAPSHOT_PAGE_SIZE);
-          const projected = createTableSnapshot(
-            profile,
-            object,
-            currentInfo,
-            page,
-            template ? { id: template.id, createdAt: template.createdAt } : undefined
-          );
-          if (!template) {
-            const { rows: _rows, ...metadata } = projected;
-            template = metadata;
-            writer = await snapshotStore.beginChunkedSnapshot(template, {
-              indexed,
-              maxBytes: SNAPSHOT_MAX_BYTES,
-              pageSize: SNAPSHOT_PAGE_SIZE
-            });
-          } else if (!sameSnapshotShape(template, projected)) {
-            throw new Error("スナップショット取得中にTableの列または主キー構成が変化しました。");
-          }
-          if (!writer) {
-            throw new Error("スナップショット書き込みを開始できませんでした。");
-          }
-          if (writer.progress.rowCount + projected.rows.length > SNAPSHOT_MAX_ROWS
-            || (writer.progress.rowCount + projected.rows.length === SNAPSHOT_MAX_ROWS && page.hasNext)) {
-            throw new Error(`スナップショット行数が安全上限 ${SNAPSHOT_MAX_ROWS.toLocaleString()} 行を超えています。`);
-          }
-          await writer.appendRows(projected.rows);
-          const current = writer.progress;
-          progress.report({
-            message: `${current.rowCount.toLocaleString()} rows / ${formatBytes(current.storageBytes)} / ${current.chunkCount} chunks`
-          });
-          if (!page.hasNext || page.rows.length === 0) {
-            break;
-          }
-          offset += page.rows.length;
-        }
-
-        if (token.isCancellationRequested) {
-          await writer?.abort();
-          vscode.window.showWarningMessage(`${object.name} のスナップショット取得をキャンセルしました。不完全なチャンクは削除しました。`);
-          return undefined;
-        }
-        if (!writer) {
-          throw new Error("スナップショットを作成できませんでした。");
-        }
-        return await writer.complete();
-      } catch (error) {
-        await writer?.abort();
-        throw error;
+      const snapshot = await captureChunkedTableSnapshot({
+        store: snapshotStore,
+        profile,
+        object,
+        info: currentInfo,
+        indexed,
+        limits: {
+          pageSize: SNAPSHOT_PAGE_SIZE,
+          maxRows: SNAPSHOT_MAX_ROWS,
+          maxBytes: SNAPSHOT_MAX_BYTES
+        },
+        loadPage: (offset, limit) => loadObjectData(client, profile, password, object, snapshotQuery, offset, limit),
+        isCancellationRequested: () => token.isCancellationRequested,
+        onProgress: (current) => progress.report({
+          message: `${current.rowCount.toLocaleString()} rows / ${formatBytes(current.storageBytes)} / ${current.chunkCount} chunks`
+        })
+      });
+      if (!snapshot) {
+        vscode.window.showWarningMessage(`${object.name} のスナップショット取得をキャンセルしました。不完全なチャンクは削除しました。`);
       }
+      return snapshot;
     }
   );
-}
-
-function sameSnapshotShape(left: TableSnapshotMetadata, right: TableSnapshotMetadata): boolean {
-  return JSON.stringify(left.columns) === JSON.stringify(right.columns)
-    && JSON.stringify(left.columnTypes) === JSON.stringify(right.columnTypes)
-    && JSON.stringify(left.primaryKeys) === JSON.stringify(right.primaryKeys)
-    && JSON.stringify(left.excludedColumns) === JSON.stringify(right.excludedColumns);
 }
 
 function formatBytes(value: number): string {
