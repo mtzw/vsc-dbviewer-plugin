@@ -886,7 +886,7 @@ function renderTsvInsertModal(object: DbObject, info: ObjectInfo, preview?: TsvI
           <span>Columns: ${columns.length}</span>
           <span>NULL: ${preview?.nullCount ?? 0}</span>
         </div>
-        <textarea id="tsv-insert-input" spellcheck="false" placeholder="書き込み可能な列順のTSVを貼り付けます。空欄は空文字、\\NはNULLとして扱います。">${escapeHtml(preview?.sourceText ?? "")}</textarea>
+        <textarea id="tsv-insert-input" spellcheck="false" placeholder="書き込み可能な列順のTSVを貼り付けます。ダブルクォートで囲むとタブや改行を含められ、二重のダブルクォートは1文字として扱います。空欄は空文字、\\NはNULLです。">${escapeHtml(preview?.sourceText ?? "")}</textarea>
         ${errorList}
         <div class="preview-table">
           <table>

@@ -49,3 +49,15 @@ test("normalizes temporal input values for browser controls", () => {
   assert.equal(normalizeTemporalInputValue({ name: "T", jdbcType: 92, typeName: "TIME", nullable: true }, "09:30:00"), "09:30:00");
   assert.equal(normalizeTemporalInputValue({ name: "TS", jdbcType: 93, typeName: "TIMESTAMP", nullable: true }, "2026-06-09 09:30:00.0"), "2026-06-09T09:30:00");
 });
+
+test("validates SQL Server datetime and datetimeoffset values", () => {
+  const datetime2 = { name: "CREATED_AT", jdbcType: 93, typeName: "datetime2", nullable: false };
+  const datetimeOffset = { name: "AUDITED_AT", jdbcType: -155, typeName: "datetimeoffset", nullable: false };
+
+  assert.equal(validateValue(datetime2, "2026-07-22T10:20:30.1234567"), null);
+  assert.equal(updateInputType(datetime2), "datetime-local");
+  assert.equal(validateValue(datetimeOffset, "2026-07-22T10:20:30.1234567+09:00"), null);
+  assert.equal(validateValue(datetimeOffset, "2026-07-22 10:20:30 +09:00"), null);
+  assert.equal(validateValue(datetimeOffset, "2026-07-22 10:20:30"), "タイムゾーン付き日時はyyyy-mm-ddTHH:mm:ss+09:00形式で入力してください。");
+  assert.equal(updateInputType(datetimeOffset), "text");
+});

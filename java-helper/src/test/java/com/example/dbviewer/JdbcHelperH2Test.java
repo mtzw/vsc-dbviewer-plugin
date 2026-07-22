@@ -83,6 +83,17 @@ public final class JdbcHelperH2Test {
     assertContains(binaryData, "\"hello\"");
     assertContains(binaryData, "\"base64:yv4=\"");
     assertNotContains(binaryData, "[B@");
+    String binaryInserted = call(
+      "insertRows",
+      jdbcUrl,
+      "{\"schema\":null,\"name\":\"BINARY_DATA\",\"type\":\"TABLE\"}",
+      100,
+      0,
+      ",\"columns\":[\"ID\",\"PAYLOAD\",\"NOTES\"],\"rows\":[[2,\"base64:ESIz\",\"inserted\"]]"
+    );
+    assertContains(binaryInserted, "\"insertedRows\":1");
+    String binaryAfterInsert = call("getObjectData", jdbcUrl, "{\"schema\":null,\"name\":\"BINARY_DATA\",\"type\":\"TABLE\"}", 100, 0);
+    assertContains(binaryAfterInsert, "[2,\"base64:ESIz\"");
     assertContains(call("getObjectDdl", jdbcUrl, "{\"schema\":null,\"name\":\"PERSON\",\"type\":\"TABLE\"}", 100, 0), "CREATE TABLE");
     String inserted = call(
       "insertRows",

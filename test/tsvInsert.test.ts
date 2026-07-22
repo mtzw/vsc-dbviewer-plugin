@@ -37,6 +37,47 @@ test("parses TSV insert values with empty strings and explicit nulls", () => {
   assert.deepEqual(preview.errors, []);
 });
 
+test("parses double-quoted TSV fields", () => {
+  const preview = buildTsvInsertPreview(table, info, '"1"\t"Alice"\t"\\N"');
+
+  assert.deepEqual(preview.rows, [["1", "Alice", null]]);
+  assert.equal(preview.nullCount, 1);
+  assert.deepEqual(preview.errors, []);
+});
+
+test("unescapes doubled quotes in quoted TSV fields", () => {
+  const preview = buildTsvInsertPreview(table, info, "1\t\"Alice \"\"Ace\"\"\"\t\"Bob's memo\"");
+
+  assert.deepEqual(preview.rows, [["1", 'Alice "Ace"', "Bob's memo"]]);
+  assert.deepEqual(preview.errors, []);
+});
+
+test("keeps tabs and newlines inside quoted TSV fields", () => {
+  const preview = buildTsvInsertPreview(table, info, '1\t"Alice\tAdmin"\t"line1\nline2"\n2\tBob\tmemo');
+
+  assert.deepEqual(preview.rows, [
+    ["1", "Alice\tAdmin", "line1\nline2"],
+    ["2", "Bob", "memo"]
+  ]);
+  assert.equal(preview.rowCount, 2);
+  assert.deepEqual(preview.errors, []);
+});
+
+test("reports an unclosed quoted TSV field", () => {
+  const preview = buildTsvInsertPreview(table, info, '1\t"Alice\tmemo');
+
+  assert.deepEqual(preview.errors, [
+    "Row 1: quoted field is not closed.",
+    "Row 1: expected 3 column(s), got 2."
+  ]);
+});
+
+test("reports characters after a closing quote", () => {
+  const preview = buildTsvInsertPreview(table, info, '1\t"Alice"x\tmemo');
+
+  assert.deepEqual(preview.errors, ["Row 1: unexpected character after closing quote."]);
+});
+
 test("reports too few TSV columns before insert", () => {
   const preview = buildTsvInsertPreview(table, info, "1\tAlice");
 

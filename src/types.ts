@@ -1,4 +1,4 @@
-export type DatabaseType = "oracle" | "postgresql" | "mysql" | "h2" | "other";
+export type DatabaseType = "oracle" | "postgresql" | "mysql" | "sqlserver" | "h2" | "other";
 
 export interface ConnectionProfile {
   id: string;

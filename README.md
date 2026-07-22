@@ -104,13 +104,16 @@ v1 では、SQL / TSV コピー、TSV 貼り付け Insert、Java Entity / Record
 
 ### v3.3 Microsoft SQL Server対応
 
-- 接続プロファイルへMicrosoft SQL Serverを追加します。
-- JDBCドライバークラスは`com.microsoft.sqlserver.jdbc.SQLServerDriver`、JDBC URLは`jdbc:sqlserver://host:1433;databaseName=database;encrypt=true`形式を想定します。
-- JDBCドライバーJARは他のDBと同様に利用者が指定します。
-- 識別子の引用、ページング、Insert SQLリテラルなどのDB固有処理を方言単位に整理します。
-- `datetime2`、`datetimeoffset`、`money`、`uniqueidentifier`、`bit`、`nvarchar(max)`、`varbinary(max)`などを確認します。
+実装済み:
+
+- 接続プロファイルへMicrosoft SQL Serverを追加しました。
+- JDBCドライバークラスの既定値は`com.microsoft.sqlserver.jdbc.SQLServerDriver`、JDBC URL例は`jdbc:sqlserver://localhost:1433;databaseName=database;encrypt=true`です。
+- SQL Serverの識別子引用、`OFFSET ... FETCH`ページング、Insert SQLリテラルを方言として分離しました。
+- Insert SQLではbitを`1` / `0`、NCHAR / NVARCHAR / NTEXTを`N'...'`、Base64形式のバイナリを`0x...`として生成します。
+- `datetime2`、`datetimeoffset`、`money`、`uniqueidentifier`、`bit`、`nvarchar(max)`、`varbinary(max)`の表示・入力経路を追加しました。
 - SQL Serverの`timestamp` / `rowversion`は日時型ではなく自動生成列として扱います。
-- 実SQL Serverを使用し、メタデータ、データ取得、エクスポート、Insert、Update、Delete、rollbackを統合テストします。
+- 利用者環境で接続、表示、書き込みを含む一通りの実機スモークテストを実施し、問題がないことを確認済みです。
+- 一時SQL Server 2022コンテナを使用し、メタデータ、固有型、ページング、Insert、Update、Delete、rollbackを自動検証します。
 
 ### v3.4 テーブル差分MVP
 
@@ -149,6 +152,14 @@ npm test
 ```sh
 H2_JAR=/path/to/h2.jar npm test
 ```
+
+SQL Server統合テストを実行する場合:
+
+```sh
+MSSQL_JDBC_JAR=/path/to/mssql-jdbc-*.jre11.jar npm run test:sqlserver
+```
+
+Dockerで一時SQL Server 2022 Developerコンテナを起動し、空きポートへ接続してテスト後に削除します。`MSSQL_DOCKER_IMAGE`でイメージを変更できます。既存SQL Serverを使用する場合は、`MSSQL_JDBC_URL`、`MSSQL_USERNAME`、`MSSQL_PASSWORD`を指定してください。対象DB内にプロセス固有の`dbviewer_it_*` schemaを一時作成し、終了時に削除します。
 
 ## VSIX作成手順
 
@@ -261,6 +272,14 @@ H2 の入力例:
 - JDBC ドライバークラス: `org.h2.Driver`
 - JDBC ドライバー JAR: `h2-*.jar`
 
+Microsoft SQL Server の入力例:
+
+- JDBC URL: `jdbc:sqlserver://localhost:1433;databaseName=database;encrypt=true`
+- JDBC ドライバークラス: `com.microsoft.sqlserver.jdbc.SQLServerDriver`
+- JDBC ドライバーJAR: `mssql-jdbc-*.jre11.jar`
+- JDBCドライバーは同梱していないため、Microsoft JDBC Driver for SQL Serverを別途用意してください。
+- 公式資料: [Using the JDBC driver](https://learn.microsoft.com/en-us/sql/connect/jdbc/using-the-jdbc-driver)、[Using basic JDBC data types](https://learn.microsoft.com/en-us/sql/connect/jdbc/using-basic-data-types)
+
 6. 接続保存後、必要に応じて `Test Connection` を実行します。
 
 7. DB Viewer のツリーを展開し、`Tables` または `Views` 配下の Table / View を選択します。
@@ -294,6 +313,7 @@ H2 の入力例:
 
 1. Tableの `データ` タブで `Paste TSV Insert` を押します。
 2. 情報タブの列順から自動生成列を除いた、書き込み可能な列順のTSVを貼り付けます。
+   - タブや改行を含む値はダブルクォートで囲み、値中のダブルクォートは`""`と記述します。
 3. `Preview` を押し、対象テーブル、行数、列、先頭行、NULL件数、型やNULL可否の検証エラーを確認します。
 4. エラーが無い場合だけ `Insert` を押して投入します。
 5. 成功後、現在の検索条件とソート条件を維持したままデータが再読み込みされます。
@@ -329,7 +349,7 @@ H2 の入力例:
 - `INSERT SQL保存` はSQL文字列をファイルへ保存するだけです。Viewを対象にした場合、そのSQLがDBで実行可能であることは保証しません。
 - TSV InsertはTableのみ対象です。View、任意SQL実行には対応していません。
 - TSV Insertはヘッダ行を解釈しません。情報タブの列順から自動生成列を除いた、書き込み可能な列順で値を貼り付けてください。
-- TSV Insertでは、空欄は空文字、`\N` はNULLとして扱います。改行を含むセルや引用符によるエスケープはv3.0では扱いません。
+- TSV Insertでは、空欄は空文字、`\N`はNULLとして扱います。フィールドをダブルクォートで囲むとタブや改行を値に含められ、値中のダブルクォートは`""`でエスケープできます。
 - Insert / Updateの型チェックは、Java helperの型変換で受け付ける標準形式に合わせたPreview時の簡易検証です。
 - 選択行削除は、主キーを取得できるTableのみ対象です。Viewや主キーが無いTableでは実行できません。
 - 行Updateは、主キーを取得できるTableのみ対象です。主キー列、自動生成列の更新とView更新には対応していません。
@@ -338,5 +358,5 @@ H2 の入力例:
 - データタブの検索条件はSQLのwhere句相当の条件式として扱います。セミコロンを含む条件式は指定できません。
 - 大量データのエクスポートは時間がかかる場合があります。キャンセルした場合、途中まで出力されたファイルが残ります。
 - 主キーとUnique Indexのどちらも取得できないTable / Viewでは、一意な並び順を決定できないため追加ロードや全件エクスポートの取得順を保証できません。
-- 自動テストはTypeScript単体テストとH2統合テストが中心です。Oracle、PostgreSQL、MySQLの実DB統合テストは未整備です。
+- 自動テストはTypeScript単体テスト、Java方言テスト、H2統合テスト、SQL Server 2022統合テストで構成します。Oracle、PostgreSQL、MySQLの実DB統合テストは未整備です。
 - DB側でTable / Viewを追加、削除した場合は、DB ViewerのRefreshを実行してツリーを更新してください。

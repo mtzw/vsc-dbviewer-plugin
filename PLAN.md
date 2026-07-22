@@ -104,23 +104,25 @@
   - [実装済み] Update / Deleteの実行件数が要求件数と一致しない場合に全体をrollbackする
   - [実装済み] 配布VSIXからテストコード、source map、Javaテストclassなどの不要物を除外する
 * v3.3
-  - Microsoft SQL Serverに正式対応する
-  - 接続プロファイルにSQL Serverを追加する
-    - JDBCドライバークラスは`com.microsoft.sqlserver.jdbc.SQLServerDriver`を既定値とする
-    - `jdbc:sqlserver://host:1433;databaseName=database;encrypt=true`形式の入力例を表示する
-    - JDBCドライバーJARは他DBと同様に利用者が指定する
-  - DB固有処理を方言単位に整理する
-    - 識別子の引用
-    - 安定したページング
-    - Insert SQLコピー / 保存のリテラル生成
-  - SQL Server固有型を確認する
-    - `datetime2`、`datetimeoffset`、`money`、`uniqueidentifier`、`bit`
-    - `nvarchar(max)`、`varbinary(max)`などの大容量・バイナリ型
-    - SQL Serverの`timestamp` / `rowversion`を日時型として扱わず、自動生成列として扱う
-  - 実SQL Serverを使用した統合テストを追加する
-    - 接続、Table / View一覧、カラム、主キー、外部キー、Indexを確認する
-    - データ表示、検索、ソート、追加ロード、全件エクスポートを確認する
-    - Insert、Update、Delete、rollback、自動生成列の除外を確認する
+  - [実装済み] Microsoft SQL Serverに正式対応する
+  - [実装済み] 接続プロファイルにSQL Serverを追加する
+    - [実装済み] JDBCドライバークラスは`com.microsoft.sqlserver.jdbc.SQLServerDriver`を既定値とする
+    - [実装済み] `jdbc:sqlserver://host:1433;databaseName=database;encrypt=true`形式の入力例を表示する
+    - [実装済み] JDBCドライバーJARは他DBと同様に利用者が指定する
+  - [実装済み] DB固有処理を方言単位に整理する
+    - [実装済み] SQL Serverでは角括弧による識別子の引用を使用する
+    - [実装済み] SQL Serverの`OFFSET ... FETCH`とMySQLの`LIMIT ... OFFSET`を方言として分離する
+    - [実装済み] Insert SQLコピー / 保存でbit、Unicode文字列、バイナリのSQL Serverリテラルを生成する
+  - [実装済み] SQL Server固有型を確認する
+    - [実装済み] `datetime2`、`datetimeoffset`、`money`、`uniqueidentifier`、`bit`の表示・入力経路を追加する
+    - [実装済み] `nvarchar(max)`をUnicode文字列、`varbinary(max)`をBase64 / 16進リテラルとして扱う
+    - [実装済み] SQL Serverの`timestamp` / `rowversion`を日時型として扱わず、自動生成列として扱う
+    - [実機確認済み] 利用者環境のSQL ServerとMicrosoft JDBC Driverで、接続、表示、書き込みを含む一通りのスモークテストを実施する
+  - [実装済み] 一時SQL Server 2022コンテナを使用した統合テストを追加する
+    - [実装済み] 接続、Table / View一覧、カラム、主キー、外部キー、Indexを確認する
+    - [実装済み] データ表示、検索、ソート、ページング、SQL Server固有型を確認する
+    - [実装済み] Insert、Update、Delete、rollback、自動生成列の除外を確認する
+  - [実装済み] TSV Insertでダブルクォートによるフィールド囲み、`""`による引用符エスケープ、引用フィールド内のタブと改行を扱う
 * v3.4
   - テーブル単位の差分確認機能のMVPを追加する
   - 対象スキーマとTableを選択し、業務処理前のスナップショットを保存できるようにする
@@ -144,7 +146,7 @@
   - v3.4.1までの安定化と差分機能を優先し、現時点では実装時期を定めない
 
 ## 実装上の既知事項
-* v3.2.1までの自動テストはTypeScript単体テストとH2統合テストが中心であり、Oracle、PostgreSQL、MySQLの実DB統合テストは未整備
+* v3.3時点でOracle、PostgreSQL、MySQLの実DB統合テストは未整備
 * 主キーとUnique Indexのどちらも取得できないTable / Viewでは、一意な並び順を決定できないためページングの取得順を保証できない
 * 行Updateの同時更新検知は主キー一致のみであり、元値一致またはrowversionによる競合検知は今後検討する
 

@@ -132,6 +132,7 @@ public final class JdbcHelper {
 
   private static Map<String, Object> getObjectInfo(Connection connection, DbObject object) throws SQLException {
     DatabaseMetaData metadata = connection.getMetaData();
+    JdbcDialect dialect = JdbcDialect.from(connection);
     List<Map<String, Object>> columns = new ArrayList<>();
     try (ResultSet rs = metadata.getColumns(null, object.schema(), object.name(), "%")) {
       while (rs.next()) {
@@ -139,7 +140,7 @@ public final class JdbcHelper {
         boolean autoIncrement = metadataFlag(rs, "IS_AUTOINCREMENT");
         boolean generated = autoIncrement
           || metadataFlag(rs, "IS_GENERATEDCOLUMN")
-          || isDatabaseGeneratedType(connection, typeName);
+          || dialect.isGeneratedType(typeName);
         Map<String, Object> column = new LinkedHashMap<>();
         column.put("name", rs.getString("COLUMN_NAME"));
         column.put("typeName", typeName);
@@ -316,7 +317,7 @@ public final class JdbcHelper {
     int safeOffset = Math.max(0, offset);
     List<OrderColumn> orderColumns = stableOrderColumns(connection, object, sortColumn, sortDirection);
     String baseSql = dataSql(connection, object, where, orderColumns);
-    String sql = paginatedSql(connection, baseSql, safeOffset, safeLimit + 1);
+    String sql = JdbcDialect.from(connection).paginatedSql(baseSql, safeOffset, safeLimit + 1, !orderColumns.isEmpty());
     try {
       try (Statement statement = connection.createStatement()) {
         return readRows(statement, sql, safeLimit, safeOffset, 0);
@@ -398,14 +399,6 @@ public final class JdbcHelper {
       columns.add(string(index.get("columnName")));
     }
     return columns;
-  }
-
-  private static String paginatedSql(Connection connection, String baseSql, int offset, int fetchRows) throws SQLException {
-    String productName = connection.getMetaData().getDatabaseProductName().toLowerCase();
-    if (productName.contains("mysql") || productName.contains("mariadb")) {
-      return baseSql + " limit " + fetchRows + " offset " + offset;
-    }
-    return baseSql + " offset " + offset + " rows fetch next " + fetchRows + " rows only";
   }
 
   private static Map<String, Object> readRows(Statement statement, String sql, int limit, int offset, int rowsToSkip) throws SQLException {
@@ -718,6 +711,7 @@ public final class JdbcHelper {
 
   private static Map<String, ColumnBinding> columnBindings(Connection connection, DbObject object, List<String> columns) throws SQLException {
     DatabaseMetaData metadata = connection.getMetaData();
+    JdbcDialect dialect = JdbcDialect.from(connection);
     Map<String, ColumnBinding> available = new HashMap<>();
     try (ResultSet rs = metadata.getColumns(null, object.schema(), object.name(), "%")) {
       while (rs.next()) {
@@ -728,7 +722,7 @@ public final class JdbcHelper {
           boolean autoIncrement = metadataFlag(rs, "IS_AUTOINCREMENT");
           boolean generated = autoIncrement
             || metadataFlag(rs, "IS_GENERATEDCOLUMN")
-            || isDatabaseGeneratedType(connection, typeName);
+            || dialect.isGeneratedType(typeName);
           ColumnBinding binding = new ColumnBinding(jdbcType, typeName, generated);
           available.put(name, binding);
           available.put(name.toUpperCase(), binding);
@@ -779,6 +773,15 @@ public final class JdbcHelper {
     if (typeName.equals("date")) {
       return Date.valueOf(value);
     }
+    if (typeName.equals("datetime") || typeName.equals("datetime2") || typeName.equals("smalldatetime")) {
+      return Timestamp.valueOf(value.replace("T", " "));
+    }
+    if (typeName.equals("money") || typeName.equals("smallmoney")) {
+      return new BigDecimal(value);
+    }
+    if (isBinaryType(binding) && value.startsWith("base64:")) {
+      return Base64.getDecoder().decode(value.substring("base64:".length()));
+    }
     return switch (binding.jdbcType()) {
       case Types.TINYINT, Types.SMALLINT, Types.INTEGER -> Integer.valueOf(value);
       case Types.BIGINT -> Long.valueOf(value);
@@ -791,6 +794,20 @@ public final class JdbcHelper {
       case Types.TIMESTAMP -> Timestamp.valueOf(value.replace("T", " "));
       case Types.TIMESTAMP_WITH_TIMEZONE -> OffsetDateTime.parse(value);
       default -> value;
+    };
+  }
+
+  private static boolean isBinaryType(ColumnBinding binding) {
+    return switch (binding.jdbcType()) {
+      case Types.BINARY, Types.VARBINARY, Types.LONGVARBINARY, Types.BLOB -> true;
+      default -> {
+        String typeName = binding.typeName() == null ? "" : binding.typeName().trim().toLowerCase();
+        yield typeName.equals("binary")
+          || typeName.equals("varbinary")
+          || typeName.equals("image")
+          || typeName.equals("timestamp")
+          || typeName.equals("rowversion");
+      }
     };
   }
 
@@ -865,11 +882,8 @@ public final class JdbcHelper {
   }
 
   private static String quote(Connection connection, String identifier) throws SQLException {
-    String quote = normalizedIdentifierQuote(connection);
-    if (quote.isBlank()) {
-      return identifier;
-    }
-    return quote + identifier.replace(quote, quote + quote) + quote;
+    DatabaseMetaData metadata = connection.getMetaData();
+    return JdbcDialect.from(connection).quoteIdentifier(identifier, metadata.getIdentifierQuoteString());
   }
 
   private static String normalizedIdentifierQuote(Connection connection) throws SQLException {
@@ -933,15 +947,6 @@ public final class JdbcHelper {
     } catch (SQLException ignored) {
       return false;
     }
-  }
-
-  private static boolean isDatabaseGeneratedType(Connection connection, String typeName) throws SQLException {
-    String normalizedType = typeName == null ? "" : typeName.trim().toLowerCase();
-    if (normalizedType.equals("rowversion")) {
-      return true;
-    }
-    String productName = connection.getMetaData().getDatabaseProductName().toLowerCase();
-    return productName.contains("microsoft sql server") && normalizedType.equals("timestamp");
   }
 
   private static DbObject object(Map<String, Object> request) {

@@ -1,4 +1,5 @@
 import { DatabaseType, DataColumnInfo, DbObject, ObjectData } from "./types";
+import { booleanSqlLiteral, quoteSqlIdentifier, quoteSqlString, sqlServerStringLiteral } from "./sqlDialect";
 
 export function toTsv(data: ObjectData, rowIndexes: number[]): string {
   return rowIndexes
@@ -23,8 +24,8 @@ export function toInsertSql(
   rowIndexes: number[],
   dbType: DatabaseType = "other"
 ): string {
-  const objectName = displayObjectName(object, identifierQuoteString);
-  const columns = data.columns.map((column) => quoteIdentifier(column, identifierQuoteString)).join(", ");
+  const objectName = displayObjectName(object, identifierQuoteString, dbType);
+  const columns = data.columns.map((column) => quoteSqlIdentifier(column, identifierQuoteString, dbType)).join(", ");
   return rowIndexes
     .map((rowIndex) => {
       const values = data.rows[rowIndex]
@@ -35,10 +36,10 @@ export function toInsertSql(
     .join("\n");
 }
 
-export function displayObjectName(object: DbObject, identifierQuoteString: string): string {
+export function displayObjectName(object: DbObject, identifierQuoteString: string, dbType: DatabaseType = "other"): string {
   return object.schema
-    ? `${quoteIdentifier(object.schema, identifierQuoteString)}.${quoteIdentifier(object.name, identifierQuoteString)}`
-    : quoteIdentifier(object.name, identifierQuoteString);
+    ? `${quoteSqlIdentifier(object.schema, identifierQuoteString, dbType)}.${quoteSqlIdentifier(object.name, identifierQuoteString, dbType)}`
+    : quoteSqlIdentifier(object.name, identifierQuoteString, dbType);
 }
 
 function formatTsvCell(value: string | number | boolean | null): string {
@@ -61,10 +62,10 @@ function toSqlLiteral(value: string | number | boolean | null, column: DataColum
     return "NULL";
   }
   if (typeof value === "number") {
-    return Number.isFinite(value) ? String(value) : quoteString(String(value));
+    return Number.isFinite(value) ? String(value) : quoteSqlString(String(value));
   }
   if (typeof value === "boolean") {
-    return value ? "TRUE" : "FALSE";
+    return booleanSqlLiteral(value, dbType);
   }
   if (dbType === "oracle") {
     const oracleLiteral = toOracleDateTimeLiteral(value, column);
@@ -72,7 +73,13 @@ function toSqlLiteral(value: string | number | boolean | null, column: DataColum
       return oracleLiteral;
     }
   }
-  return quoteString(value);
+  if (dbType === "sqlserver") {
+    const sqlServerLiteral = sqlServerStringLiteral(value, column);
+    if (sqlServerLiteral) {
+      return sqlServerLiteral;
+    }
+  }
+  return quoteSqlString(value);
 }
 
 function toOracleDateTimeLiteral(value: string, column: DataColumnInfo | undefined): string | undefined {
@@ -82,16 +89,16 @@ function toOracleDateTimeLiteral(value: string, column: DataColumnInfo | undefin
   const normalized = value.trim().replace("T", " ");
   const dateMatch = /^(\d{4}-\d{2}-\d{2})$/.exec(normalized);
   if (dateMatch && isOracleDateColumn(column)) {
-    return `DATE ${quoteString(dateMatch[1])}`;
+    return `DATE ${quoteSqlString(dateMatch[1])}`;
   }
 
   const dateTimeMatch = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})(\.\d+)?$/.exec(normalized);
   if (dateTimeMatch) {
     const literal = `${dateTimeMatch[1]} ${dateTimeMatch[2]}${dateTimeMatch[3] ?? ""}`;
     if (isOracleDateColumn(column)) {
-      return `TO_DATE(${quoteString(`${dateTimeMatch[1]} ${dateTimeMatch[2]}`)}, ${quoteString("YYYY-MM-DD HH24:MI:SS")})`;
+      return `TO_DATE(${quoteSqlString(`${dateTimeMatch[1]} ${dateTimeMatch[2]}`)}, ${quoteSqlString("YYYY-MM-DD HH24:MI:SS")})`;
     }
-    return `TIMESTAMP ${quoteString(literal)}`;
+    return `TIMESTAMP ${quoteSqlString(literal)}`;
   }
 
   const timeZoneMatch = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})(\.\d+)? ?(Z|[+-]\d{2}:?\d{2}|[A-Za-z_\/]+)$/.exec(normalized);
@@ -100,11 +107,11 @@ function toOracleDateTimeLiteral(value: string, column: DataColumnInfo | undefin
     const literal = `${timeZoneMatch[1]} ${timeZoneMatch[2]}${timeZoneMatch[3] ?? ""} ${zone}`;
     const zoneFormat = /^[+-]\d{2}:?\d{2}$/.test(zone) ? "TZH:TZM" : "TZR";
     const format = `${timeZoneMatch[3] ? "YYYY-MM-DD HH24:MI:SS.FF" : "YYYY-MM-DD HH24:MI:SS"} ${zoneFormat}`;
-    return `TO_TIMESTAMP_TZ(${quoteString(literal)}, ${quoteString(format)})`;
+    return `TO_TIMESTAMP_TZ(${quoteSqlString(literal)}, ${quoteSqlString(format)})`;
   }
 
   if (isOracleTimestampColumn(column)) {
-    return `TO_TIMESTAMP(${quoteString(value)}, ${quoteString("YYYY-MM-DD HH24:MI:SS.FF")})`;
+    return `TO_TIMESTAMP(${quoteSqlString(value)}, ${quoteSqlString("YYYY-MM-DD HH24:MI:SS.FF")})`;
   }
   return undefined;
 }
@@ -125,15 +132,4 @@ function isOracleTimestampColumn(column: DataColumnInfo): boolean {
 function isOracleTimestampWithTimeZoneColumn(column: DataColumnInfo): boolean {
   const typeName = (column.typeName ?? "").toUpperCase();
   return column.jdbcType === 2014 || typeName.includes("WITH TIME ZONE") || typeName.includes("WITH LOCAL TIME ZONE");
-}
-
-function quoteString(value: string): string {
-  return `'${value.replace(/'/g, "''")}'`;
-}
-
-function quoteIdentifier(identifier: string, quote: string): string {
-  if (!quote) {
-    return identifier;
-  }
-  return `${quote}${identifier.replaceAll(quote, quote + quote)}${quote}`;
 }

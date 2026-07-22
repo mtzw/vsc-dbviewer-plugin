@@ -64,6 +64,9 @@ export function validateValue(column: ValidationColumn, value: string | null): s
   if (kind === "timestamp" && !/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?$/.test(value)) {
     return "日時はyyyy-mm-dd HH:mm:ssまたはyyyy-mm-ddTHH:mm:ss形式で入力してください。";
   }
+  if (kind === "timestamp-offset" && !/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d{1,9})? ?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) {
+    return "タイムゾーン付き日時はyyyy-mm-ddTHH:mm:ss+09:00形式で入力してください。";
+  }
   return null;
 }
 
@@ -99,9 +102,12 @@ export function normalizeTemporalInputValue(column: ValidationColumn, value: str
   return text;
 }
 
-type ValidationKind = "integer" | "decimal" | "boolean" | "date" | "time" | "timestamp" | "string";
+type ValidationKind = "integer" | "decimal" | "boolean" | "date" | "time" | "timestamp" | "timestamp-offset" | "string";
 
 function validationKind(column: ValidationColumn): ValidationKind {
+  if (isTimestampOffset(column)) {
+    return "timestamp-offset";
+  }
   if (isDate(column)) {
     return "date";
   }
@@ -145,7 +151,17 @@ function isTime(column: ValidationColumn): boolean {
 }
 
 function isTimestamp(column: ValidationColumn): boolean {
-  return matchesJdbcType(column, [93]) || normalizedTypeName(column).startsWith("timestamp") && !normalizedTypeName(column).includes("time zone");
+  const typeName = normalizedTypeName(column);
+  return matchesJdbcType(column, [93])
+    || typeName.startsWith("timestamp") && !typeName.includes("time zone")
+    || ["datetime", "datetime2", "smalldatetime"].includes(typeName);
+}
+
+function isTimestampOffset(column: ValidationColumn): boolean {
+  const typeName = normalizedTypeName(column);
+  return matchesJdbcType(column, [2014, -155])
+    || typeName === "datetimeoffset"
+    || typeName.includes("timestamp with time zone");
 }
 
 function matchesJdbcType(column: ValidationColumn, jdbcTypes: number[]): boolean {

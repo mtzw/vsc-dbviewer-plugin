@@ -1,13 +1,7 @@
 import * as vscode from "vscode";
 import { JdbcClient } from "./jdbcClient";
-import { ConnectionInput, ConnectionProfile, DatabaseType } from "./types";
-
-interface DatabaseTypeOption {
-  label: string;
-  value: DatabaseType;
-  defaultDriverClass: string;
-  jdbcUrlExample: string;
-}
+import { DATABASE_TYPES } from "./databaseTypes";
+import { ConnectionInput, ConnectionProfile } from "./types";
 
 interface EditorState {
   mode: "add" | "edit";
@@ -20,14 +14,6 @@ type EditorMessage =
   | { type: "test"; input: ConnectionInput }
   | { type: "save"; input: ConnectionInput }
   | { type: "cancel" };
-
-const DATABASE_TYPES: DatabaseTypeOption[] = [
-  { label: "Oracle", value: "oracle", defaultDriverClass: "oracle.jdbc.OracleDriver", jdbcUrlExample: "jdbc:oracle:thin:@//localhost:1521/FREEPDB1" },
-  { label: "PostgreSQL", value: "postgresql", defaultDriverClass: "org.postgresql.Driver", jdbcUrlExample: "jdbc:postgresql://localhost:5432/postgres" },
-  { label: "MySQL", value: "mysql", defaultDriverClass: "com.mysql.cj.jdbc.Driver", jdbcUrlExample: "jdbc:mysql://localhost:3306/app" },
-  { label: "H2", value: "h2", defaultDriverClass: "org.h2.Driver", jdbcUrlExample: "jdbc:h2:mem:test" },
-  { label: "Other", value: "other", defaultDriverClass: "", jdbcUrlExample: "jdbc:vendor://host:port/database" }
-];
 
 export class ConnectionEditorPanel {
   static open(
