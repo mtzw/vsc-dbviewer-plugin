@@ -160,6 +160,56 @@ test("detects corrupted chunk content before loading rows", async () => {
   await assert.rejects(store.load(snapshot.id), /破損しています/);
 });
 
+test("reports a missing chunk with its file name", async () => {
+  const directory = await createTemporaryDirectory();
+  const store = new SnapshotStore(directory);
+  const snapshot = createTableSnapshot({ id: "profile-1", name: "local" }, object, info, data, {
+    id: "abababab-abab-4bab-8bab-abababababab"
+  });
+  const { rows: _rows, ...metadata } = snapshot;
+  const writer = await store.beginChunkedSnapshot(metadata, { indexed: true, maxBytes: 1024, pageSize: 1 });
+  await writer.appendRows([[1]]);
+  await writer.complete();
+  await fs.unlink(path.join(directory, snapshot.id, "chunk-000000.json"));
+
+  await assert.rejects(store.load(snapshot.id), /chunk-000000\.json が見つかりません/);
+});
+
+test("rejects an invalid chunk manifest before comparison", async () => {
+  const directory = await createTemporaryDirectory();
+  const store = new SnapshotStore(directory);
+  const snapshot = createTableSnapshot({ id: "profile-1", name: "local" }, object, info, data, {
+    id: "acacacac-acac-4cac-8cac-acacacacacac"
+  });
+  const { rows: _rows, ...metadata } = snapshot;
+  const writer = await store.beginChunkedSnapshot(metadata, { indexed: true, maxBytes: 1024, pageSize: 1 });
+  await writer.appendRows([[1]]);
+  await writer.complete();
+  const manifestPath = path.join(directory, snapshot.id, "manifest.json");
+  const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8")) as { contentFingerprint: string };
+  manifest.contentFingerprint = "not-a-sha256";
+  await fs.writeFile(manifestPath, `${JSON.stringify(manifest)}\n`, "utf8");
+
+  await assert.rejects(store.loadMetadata(snapshot.id), /マニフェストが不正/);
+});
+
+test("serializes index updates from concurrently opened panels", async () => {
+  const directory = await createTemporaryDirectory();
+  const firstStore = new SnapshotStore(directory);
+  const secondStore = new SnapshotStore(directory);
+  const snapshots = Array.from({ length: 12 }, (_, index) => createTableSnapshot(
+    { id: "profile-1", name: "local" },
+    object,
+    info,
+    data,
+    { id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}` }
+  ));
+
+  await Promise.all(snapshots.map((snapshot, index) => (index % 2 === 0 ? firstStore : secondStore).save(snapshot)));
+
+  assert.equal((await firstStore.list()).length, snapshots.length);
+});
+
 async function createTemporaryDirectory(): Promise<string> {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "db-viewer-snapshot-test-"));
   temporaryDirectories.push(directory);

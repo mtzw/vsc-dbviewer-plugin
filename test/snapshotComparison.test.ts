@@ -30,6 +30,10 @@ const data: ObjectData = {
 class CountingSnapshotStore extends SnapshotStore {
   loadCount = 0;
 
+  constructor(readonly directory: string) {
+    super(directory);
+  }
+
   override async load(id: string): Promise<TableSnapshot> {
     this.loadCount += 1;
     return super.load(id);
@@ -87,6 +91,64 @@ test("returns a summary when changed snapshots exceed the detail limit", async (
 
   assert.equal(diff.changed, true);
   assert.equal(diff.rowClassificationReason, "detail-limit");
+  assert.equal(store.loadCount, 0);
+});
+
+test("compares a v3.4 single-file snapshot with a chunked snapshot", async () => {
+  const store = await createStore();
+  const before = createTableSnapshot(
+    { id: "profile-1", name: "local" }, object, info, { ...data, rows: [[1, "Alice"]] },
+    { id: "dededede-dede-4ede-8ede-dededededede" }
+  );
+  await store.save(before);
+  const afterId = "dfdfdfdf-dfdf-4fdf-8fdf-dfdfdfdfdfdf";
+  await writeSnapshot(store, afterId, [[1, "Alicia"], [2, "Bob"]]);
+
+  const diff = await compareStoredSnapshots(store, before.id, afterId, {
+    maxDetailRowsPerSnapshot: 10,
+    maxDetailBytesPerSnapshot: 1024 * 1024
+  });
+
+  assert.deepEqual(diff.addedRows.map((row) => row.key), [[2]]);
+  assert.deepEqual(diff.updatedRows.map((row) => row.key), [[1]]);
+  assert.equal(await store.delete(before.id), true);
+  await assert.rejects(store.load(before.id), /ENOENT/);
+});
+
+test("applies the byte detail limit to v3.4 single-file snapshots", async () => {
+  const store = await createStore();
+  const before = createTableSnapshot(
+    { id: "profile-1", name: "local" }, object, info, { ...data, rows: [[1, "Alice"]] },
+    { id: "eaeaeaea-eaea-4aea-8aea-eaeaeaeaeaea" }
+  );
+  const after = createTableSnapshot(
+    { id: "profile-1", name: "local" }, object, info, { ...data, rows: [[1, "Alicia"]] },
+    { id: "ebebebeb-ebeb-4beb-8beb-ebebebebebeb" }
+  );
+  await store.save(before);
+  await store.save(after);
+
+  const diff = await compareStoredSnapshots(store, before.id, after.id, {
+    maxDetailRowsPerSnapshot: 10,
+    maxDetailBytesPerSnapshot: 1
+  });
+
+  assert.equal(diff.rowClassificationReason, "detail-limit");
+  assert.equal(store.loadCount, 0);
+});
+
+test("detects same-size chunk corruption when unchanged rows use the summary path", async () => {
+  const store = await createStore();
+  const beforeId = "ecececec-ecec-4cec-8cec-ecececececec";
+  const afterId = "edededed-eded-4ded-8ded-edededededed";
+  await writeSnapshot(store, beforeId, [[1, "Alice"]]);
+  await writeSnapshot(store, afterId, [[1, "Alice"]]);
+  await fs.writeFile(path.join(store.directory, beforeId, "chunk-000000.json"), "[[2,\"Alice\"]]\n", "utf8");
+
+  await assert.rejects(compareStoredSnapshots(store, beforeId, afterId, {
+    maxDetailRowsPerSnapshot: 10,
+    maxDetailBytesPerSnapshot: 1024 * 1024
+  }), /破損しています/);
   assert.equal(store.loadCount, 0);
 });
 

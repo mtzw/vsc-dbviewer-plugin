@@ -156,6 +156,39 @@ test("aborts capture when the table shape changes between pages", async () => {
   assert.equal((await fs.readdir(directory)).some((entry) => entry.startsWith(".capture-")), false);
 });
 
+test("aborts capture when pagination stops making progress", async () => {
+  const { directory, store } = await createStore();
+
+  await assert.rejects(captureChunkedTableSnapshot({
+    store,
+    profile,
+    object,
+    info,
+    indexed: true,
+    limits: { pageSize: 1, maxRows: 10, maxBytes: 1024 * 1024 },
+    loadPage: async (offset, limit) => offset === 0
+      ? page([[1, "A"], [2, "B"]], offset, limit)
+      : { ...page([], offset, limit), hasNext: true }
+  }), /ページ取得が進行しませんでした/);
+
+  assert.deepEqual(await store.list(), []);
+  assert.equal((await fs.readdir(directory)).some((entry) => entry.startsWith(".capture-")), false);
+});
+
+test("rejects snapshot capture for views", async () => {
+  const { store } = await createStore();
+
+  await assert.rejects(captureChunkedTableSnapshot({
+    store,
+    profile,
+    object: { ...object, type: "VIEW" },
+    info: { ...info, type: "VIEW" },
+    indexed: true,
+    limits: { pageSize: 1, maxRows: 10, maxBytes: 1024 * 1024 },
+    loadPage: async (offset, limit) => page([], offset, limit)
+  }), /Tableのみ/);
+});
+
 function page(rows: ObjectData["rows"], offset: number, limit: number): ObjectData {
   const currentRows = rows.slice(offset, offset + limit);
   return {

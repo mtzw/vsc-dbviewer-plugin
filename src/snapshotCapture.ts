@@ -30,6 +30,9 @@ export async function captureChunkedTableSnapshot(
   options: SnapshotCaptureOptions
 ): Promise<SnapshotDescriptor | undefined> {
   validateLimits(options.limits);
+  if (options.object.type !== "TABLE") {
+    throw new Error("スナップショットはTableのみ作成できます。");
+  }
   let offset = 0;
   let writer: Awaited<ReturnType<SnapshotStore["beginChunkedSnapshot"]>> | undefined;
   let template: TableSnapshotMetadata | undefined;
@@ -37,6 +40,7 @@ export async function captureChunkedTableSnapshot(
   try {
     while (!options.isCancellationRequested?.()) {
       const page = await options.loadPage(offset, options.limits.pageSize);
+      validatePage(page, offset, options.limits.pageSize);
       const projected = createTableSnapshot(
         options.profile,
         options.object,
@@ -65,7 +69,7 @@ export async function captureChunkedTableSnapshot(
       }
       await writer.appendRows(projected.rows);
       options.onProgress?.(writer.progress);
-      if (!page.hasNext || page.rows.length === 0) {
+      if (!page.hasNext) {
         break;
       }
       offset += page.rows.length;
@@ -94,6 +98,18 @@ function validateLimits(limits: SnapshotCaptureLimits): void {
   }
   if (!Number.isFinite(limits.maxBytes) || limits.maxBytes <= 0) {
     throw new Error("スナップショット容量上限は1 byte以上で指定してください。");
+  }
+}
+
+function validatePage(page: ObjectData, expectedOffset: number, pageSize: number): void {
+  if (page.offset !== expectedOffset
+    || page.rows.length > pageSize
+    || page.columns.length !== page.columnTypes.length
+    || page.rows.some((row) => row.length !== page.columns.length)) {
+    throw new Error("スナップショットのページ取得結果が不正です。");
+  }
+  if (page.hasNext && page.rows.length === 0) {
+    throw new Error("スナップショットのページ取得が進行しませんでした。");
   }
 }
 

@@ -103,14 +103,13 @@ export function createTableSnapshot(
   data: Pick<ObjectData, "columns" | "columnTypes" | "rows">,
   options: { id?: string; createdAt?: string } = {}
 ): TableSnapshot {
-  const primaryKeyNames = new Set(info.primaryKeys.map(normalizeIdentifier));
   const includedIndexes: number[] = [];
   const excludedColumns: string[] = [];
 
   for (let index = 0; index < data.columns.length; index += 1) {
     const column = data.columns[index];
     const type = data.columnTypes[index];
-    if (!primaryKeyNames.has(normalizeIdentifier(column)) && shouldExcludeColumn(type)) {
+    if (shouldExcludeColumn(type)) {
       excludedColumns.push(column);
     } else {
       includedIndexes.push(index);
@@ -124,7 +123,9 @@ export function createTableSnapshot(
     jdbcType: null
   });
   const columnNames = new Set(columns.map(normalizeIdentifier));
-  const primaryKeys = info.primaryKeys.filter((column) => columnNames.has(normalizeIdentifier(column)));
+  const primaryKeys = info.primaryKeys.every((column) => columnNames.has(normalizeIdentifier(column)))
+    ? [...info.primaryKeys]
+    : [];
   const rows = data.rows.map((row) => includedIndexes.map((index) => row[index] ?? null));
 
   return {
@@ -218,6 +219,7 @@ export function compareTableSnapshotMetadata(
   assertSameTarget(before, after);
   const schemaChanged = !sameIdentifiers(before.columns, after.columns)
     || !sameIdentifiers(before.primaryKeys, after.primaryKeys)
+    || !sameIdentifiers(before.excludedColumns, after.excludedColumns)
     || !sameColumnTypes(before.columnTypes, after.columnTypes);
   const changed = schemaChanged
     || before.rowCount !== after.rowCount
@@ -353,7 +355,8 @@ function indexRowsByKey(rows: SnapshotCell[][], keyIndexes: number[], label: str
 function assertSameTarget(before: TableSnapshotMetadata, after: TableSnapshotMetadata): void {
   if (before.profileId !== after.profileId
     || normalizeIdentifier(before.object.schema ?? "") !== normalizeIdentifier(after.object.schema ?? "")
-    || normalizeIdentifier(before.object.name) !== normalizeIdentifier(after.object.name)) {
+    || normalizeIdentifier(before.object.name) !== normalizeIdentifier(after.object.name)
+    || before.object.type !== after.object.type) {
     throw new Error("異なる接続またはTableのスナップショットは比較できません。");
   }
 }

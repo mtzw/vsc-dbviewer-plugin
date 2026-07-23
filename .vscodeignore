@@ -10,4 +10,5 @@ scripts/**
 tsconfig.json
 .drivers/**
 PLAN.md
+ACCEPTANCE-*.md
 .gitignore

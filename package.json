@@ -2,7 +2,7 @@
   "name": "vsc-dbviewer-plugin",
   "displayName": "DB Viewer",
   "description": "JDBC database viewer for VS Code and compatible editors.",
-  "version": "3.4.1",
+  "version": "3.4.2",
   "publisher": "mtzw",
   "repository": {
     "type": "git",

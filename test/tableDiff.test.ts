@@ -79,6 +79,35 @@ test("ignores changes in excluded large-object columns", () => {
   assert.deepEqual(before.excludedColumns, ["PAYLOAD"]);
 });
 
+test("does not retain binary primary-key data or classify by an incomplete composite key", () => {
+  const binaryKeyInfo: ObjectInfo = {
+    ...info,
+    columns: [
+      info.columns[0],
+      { ...info.columns[2], name: "BINARY_KEY", nullable: false },
+      info.columns[1]
+    ],
+    primaryKeys: ["ID", "BINARY_KEY"]
+  };
+  const binaryKeyData: ObjectData = {
+    ...data([]),
+    columns: ["ID", "BINARY_KEY", "NAME"],
+    columnTypes: [
+      { name: "ID", typeName: "INTEGER", jdbcType: 4 },
+      { name: "BINARY_KEY", typeName: "VARBINARY", jdbcType: -3 },
+      { name: "NAME", typeName: "VARCHAR", jdbcType: 12 }
+    ],
+    rows: [[1, "sensitive-base64", "Alice"]]
+  };
+
+  const snapshot = createTableSnapshot(profile, object, binaryKeyInfo, binaryKeyData);
+
+  assert.deepEqual(snapshot.columns, ["ID", "NAME"]);
+  assert.deepEqual(snapshot.rows, [[1, "Alice"]]);
+  assert.deepEqual(snapshot.excludedColumns, ["BINARY_KEY"]);
+  assert.deepEqual(snapshot.primaryKeys, []);
+});
+
 test("detects content changes without row classification when no primary key exists", () => {
   const noKeyInfo = { ...info, primaryKeys: [] };
   const before = createTableSnapshot(profile, object, noKeyInfo, data([[1, "Alice", null]]));
@@ -104,6 +133,21 @@ test("marks schema changes and disables row classification", () => {
   assert.equal(diff.changed, true);
   assert.equal(diff.schemaChanged, true);
   assert.equal(diff.rowClassificationAvailable, false);
+});
+
+test("detects changes that only add an excluded LOB column", () => {
+  const beforeData = data([[1, "Alice", null]]);
+  beforeData.columns = ["ID", "NAME"];
+  beforeData.columnTypes = beforeData.columnTypes.slice(0, 2);
+  beforeData.rows = [[1, "Alice"]];
+  const before = createTableSnapshot(profile, object, info, beforeData);
+  const after = createTableSnapshot(profile, object, info, data([[1, "Alice", "binary"]]));
+
+  const diff = compareTableSnapshots(before, after);
+
+  assert.equal(diff.changed, true);
+  assert.equal(diff.schemaChanged, true);
+  assert.equal(diff.rowClassificationReason, "schema-changed");
 });
 
 test("exports summary and row details as escaped CSV", () => {

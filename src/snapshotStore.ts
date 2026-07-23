@@ -42,6 +42,7 @@ export interface ChunkedSnapshotOptions {
 }
 
 const EMPTY_INDEX: SnapshotIndex = { formatVersion: 1, snapshots: [] };
+const indexMutationTails = new Map<string, Promise<void>>();
 
 export class SnapshotStore {
   constructor(private readonly rootDirectory: string) {}
@@ -52,8 +53,13 @@ export class SnapshotStore {
     await fs.mkdir(this.rootDirectory, { recursive: true, mode: 0o700 });
     await writeJsonAtomic(this.snapshotPath(snapshot.id), normalized);
     const descriptor = toSnapshotDescriptor(normalized, { storageFormat: "single-file" });
-    await this.upsertDescriptor(descriptor);
-    return descriptor;
+    try {
+      await this.upsertDescriptor(descriptor);
+      return descriptor;
+    } catch (error) {
+      await removeIfExists(this.snapshotPath(snapshot.id));
+      throw error;
+    }
   }
 
   async beginChunkedSnapshot(
@@ -91,6 +97,9 @@ export class SnapshotStore {
       const content = await fs.readFile(path.join(this.snapshotDirectory(id), "manifest.json"), "utf8");
       const manifest = JSON.parse(content) as ChunkedSnapshotManifest;
       validateManifest(manifest);
+      if (manifest.id !== id) {
+        throw new Error("チャンク型スナップショットのIDが保存先と一致しません。");
+      }
       return manifest;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
@@ -107,15 +116,19 @@ export class SnapshotStore {
       return metadata as TableSnapshot;
     }
     const rows: SnapshotCell[][] = [];
-    for await (const chunkRows of this.readChunks(id)) {
+    for await (const chunkRows of this.readChunkRows(id, metadata as ChunkedSnapshotManifest)) {
       rows.push(...chunkRows);
+    }
+    const contentFingerprint = fingerprintSnapshotRows(rows);
+    if (contentFingerprint !== metadata.contentFingerprint) {
+      throw new Error("スナップショットの内容フィンガープリントが一致しません。マニフェストが破損しています。");
     }
     return {
       ...metadata,
       formatVersion: 1,
       rows,
       rowCount: rows.length,
-      contentFingerprint: fingerprintSnapshotRows(rows)
+      contentFingerprint
     };
   }
 
@@ -125,38 +138,48 @@ export class SnapshotStore {
       yield (metadata as TableSnapshot).rows;
       return;
     }
-    const manifest = metadata as ChunkedSnapshotManifest;
-    for (const chunk of manifest.chunks) {
-      const content = await fs.readFile(path.join(this.snapshotDirectory(id), chunk.fileName), "utf8");
-      if (Buffer.byteLength(content, "utf8") !== chunk.byteLength) {
-        throw new Error(`スナップショットチャンク ${chunk.fileName} の容量が一致しません。`);
-      }
-      const contentHash = createHash("sha256").update(content).digest("hex");
-      if (contentHash !== chunk.contentHash) {
-        throw new Error(`スナップショットチャンク ${chunk.fileName} が破損しています。`);
-      }
-      const rows = JSON.parse(content) as SnapshotCell[][];
-      if (!Array.isArray(rows) || rows.length !== chunk.rowCount) {
-        throw new Error(`スナップショットチャンク ${chunk.fileName} の行数が一致しません。`);
-      }
-      yield rows;
+    yield* this.readChunkRows(id, metadata as ChunkedSnapshotManifest);
+  }
+
+  async verifyIntegrity(id: string, metadata?: TableSnapshotMetadata): Promise<void> {
+    const current = metadata ?? await this.loadMetadata(id);
+    if (current.formatVersion === 1) {
+      return;
     }
+    const manifest = current as ChunkedSnapshotManifest;
+    const fingerprint = new SnapshotFingerprintBuilder();
+    for await (const rows of this.readChunkRows(id, manifest)) {
+      fingerprint.addRows(rows);
+    }
+    if (fingerprint.digest() !== manifest.contentFingerprint) {
+      throw new Error("スナップショットの内容フィンガープリントが一致しません。マニフェストが破損しています。");
+    }
+  }
+
+  async storageBytes(id: string, metadata?: TableSnapshotMetadata): Promise<number> {
+    const current = metadata ?? await this.loadMetadata(id);
+    if (current.formatVersion === 2) {
+      return (current as ChunkedSnapshotManifest).storageBytes;
+    }
+    return (await fs.stat(this.snapshotPath(id))).size;
   }
 
   async delete(id: string): Promise<boolean> {
     validateId(id);
-    const index = await this.readIndex();
-    const existed = index.snapshots.some((snapshot) => snapshot.id === id);
-    await Promise.all([
-      removeIfExists(this.snapshotPath(id)),
-      fs.rm(this.snapshotDirectory(id), { recursive: true, force: true }),
-      fs.rm(this.temporarySnapshotDirectory(id), { recursive: true, force: true })
-    ]);
-    if (existed) {
-      index.snapshots = index.snapshots.filter((snapshot) => snapshot.id !== id);
-      await this.writeIndex(index);
-    }
-    return existed;
+    return withIndexMutation(this.rootDirectory, async () => {
+      const index = await this.readIndex();
+      const existed = index.snapshots.some((snapshot) => snapshot.id === id);
+      await Promise.all([
+        removeIfExists(this.snapshotPath(id)),
+        fs.rm(this.snapshotDirectory(id), { recursive: true, force: true }),
+        fs.rm(this.temporarySnapshotDirectory(id), { recursive: true, force: true })
+      ]);
+      if (existed) {
+        index.snapshots = index.snapshots.filter((snapshot) => snapshot.id !== id);
+        await this.writeIndex(index);
+      }
+      return existed;
+    });
   }
 
   async prune(retentionDays: number, now = new Date()): Promise<number> {
@@ -164,27 +187,32 @@ export class SnapshotStore {
       throw new Error("保存期間は0以上の日数で指定してください。");
     }
     await this.cleanupIncomplete(24, now);
-    const cutoff = now.getTime() - retentionDays * 24 * 60 * 60 * 1000;
-    const index = await this.readIndex();
-    const expired = index.snapshots.filter((snapshot) => {
-      const createdAt = Date.parse(snapshot.createdAt);
-      return !Number.isFinite(createdAt) || createdAt < cutoff;
+    return withIndexMutation(this.rootDirectory, async () => {
+      const cutoff = now.getTime() - retentionDays * 24 * 60 * 60 * 1000;
+      const index = await this.readIndex();
+      const expired = index.snapshots.filter((snapshot) => {
+        const createdAt = Date.parse(snapshot.createdAt);
+        return !Number.isFinite(createdAt) || createdAt < cutoff;
+      });
+      for (const snapshot of expired) {
+        await Promise.all([
+          removeIfExists(this.snapshotPath(snapshot.id)),
+          fs.rm(this.snapshotDirectory(snapshot.id), { recursive: true, force: true })
+        ]);
+      }
+      if (expired.length > 0) {
+        const expiredIds = new Set(expired.map((snapshot) => snapshot.id));
+        index.snapshots = index.snapshots.filter((snapshot) => !expiredIds.has(snapshot.id));
+        await this.writeIndex(index);
+      }
+      return expired.length;
     });
-    for (const snapshot of expired) {
-      await Promise.all([
-        removeIfExists(this.snapshotPath(snapshot.id)),
-        fs.rm(this.snapshotDirectory(snapshot.id), { recursive: true, force: true })
-      ]);
-    }
-    if (expired.length > 0) {
-      const expiredIds = new Set(expired.map((snapshot) => snapshot.id));
-      index.snapshots = index.snapshots.filter((snapshot) => !expiredIds.has(snapshot.id));
-      await this.writeIndex(index);
-    }
-    return expired.length;
   }
 
   async cleanupIncomplete(retentionHours: number, now = new Date()): Promise<number> {
+    if (!Number.isFinite(retentionHours) || retentionHours < 0) {
+      throw new Error("不完全データの保存期間は0以上の時間で指定してください。");
+    }
     let entries: import("node:fs").Dirent[];
     try {
       entries = await fs.readdir(this.rootDirectory, { withFileTypes: true });
@@ -224,11 +252,55 @@ export class SnapshotStore {
     return path.join(this.rootDirectory, `.capture-${id}`);
   }
 
+  private async *readChunkRows(
+    id: string,
+    manifest: ChunkedSnapshotManifest
+  ): AsyncGenerator<SnapshotCell[][]> {
+    for (const chunk of manifest.chunks) {
+      const content = await this.readChunkContent(id, chunk);
+      let rows: unknown;
+      try {
+        rows = JSON.parse(content);
+      } catch (error) {
+        throw new Error(`スナップショットチャンク ${chunk.fileName} のJSONが不正です: ${(error as Error).message}`);
+      }
+      validateChunkRows(rows, chunk, manifest.columns.length);
+      yield rows;
+    }
+  }
+
+  private async readChunkContent(id: string, chunk: SnapshotChunkDescriptor): Promise<string> {
+    let content: string;
+    try {
+      content = await fs.readFile(path.join(this.snapshotDirectory(id), chunk.fileName), "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new Error(`スナップショットチャンク ${chunk.fileName} が見つかりません。`);
+      }
+      throw error;
+    }
+    if (Buffer.byteLength(content, "utf8") !== chunk.byteLength) {
+      throw new Error(`スナップショットチャンク ${chunk.fileName} の容量が一致しません。`);
+    }
+    const contentHash = createHash("sha256").update(content).digest("hex");
+    if (contentHash !== chunk.contentHash) {
+      throw new Error(`スナップショットチャンク ${chunk.fileName} が破損しています。`);
+    }
+    return content;
+  }
+
   private async loadSingleFile(id: string): Promise<TableSnapshot> {
     const content = await fs.readFile(this.snapshotPath(id), "utf8");
     const snapshot = JSON.parse(content) as TableSnapshot;
     validateSnapshot(snapshot);
-    return { ...snapshot, contentFingerprint: fingerprintSnapshotRows(snapshot.rows) };
+    if (snapshot.id !== id) {
+      throw new Error("単一ファイル型スナップショットのIDがファイル名と一致しません。");
+    }
+    const contentFingerprint = fingerprintSnapshotRows(snapshot.rows);
+    if (contentFingerprint !== snapshot.contentFingerprint) {
+      throw new Error("スナップショットの内容フィンガープリントが一致しません。単一ファイルが破損しています。");
+    }
+    return snapshot;
   }
 
   private async finalizeChunkedSnapshot(
@@ -257,10 +329,12 @@ export class SnapshotStore {
   }
 
   private async upsertDescriptor(descriptor: SnapshotDescriptor): Promise<void> {
-    const index = await this.readIndex();
-    index.snapshots = [descriptor, ...index.snapshots.filter((current) => current.id !== descriptor.id)]
-      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
-    await this.writeIndex(index);
+    await withIndexMutation(this.rootDirectory, async () => {
+      const index = await this.readIndex();
+      index.snapshots = [descriptor, ...index.snapshots.filter((current) => current.id !== descriptor.id)]
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+      await this.writeIndex(index);
+    });
   }
 
   private async readIndex(): Promise<SnapshotIndex> {
@@ -389,48 +463,157 @@ async function removeIfExists(target: string): Promise<void> {
 }
 
 function validateId(id: string): void {
-  if (!/^[0-9a-f-]{36}$/i.test(id)) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
     throw new Error("スナップショットIDが不正です。");
   }
 }
 
 function validateSnapshot(snapshot: TableSnapshot): void {
-  if (snapshot.formatVersion !== 1 || !Array.isArray(snapshot.rows) || !Array.isArray(snapshot.columns)) {
+  if (!snapshot || typeof snapshot !== "object"
+    || snapshot.formatVersion !== 1
+    || !Array.isArray(snapshot.rows)) {
     throw new Error("スナップショット形式に対応していません。");
   }
   validateId(snapshot.id);
+  validateMetadata(snapshot);
   if (snapshot.rowCount !== snapshot.rows.length) {
     throw new Error("スナップショットの行数が一致しません。");
   }
+  validateRows(snapshot.rows, snapshot.columns.length, "単一ファイル型スナップショット");
 }
 
 function validateManifest(manifest: ChunkedSnapshotManifest): void {
-  if (manifest.formatVersion !== 2
+  if (!manifest || typeof manifest !== "object"
+    || manifest.formatVersion !== 2
     || manifest.fingerprintAlgorithm !== "sha256-multiset-v1"
-    || !Array.isArray(manifest.chunks)
-    || !Array.isArray(manifest.columns)) {
+    || !Array.isArray(manifest.chunks)) {
     throw new Error("チャンク型スナップショット形式に対応していません。");
   }
   validateId(manifest.id);
+  validateMetadata(manifest);
+  if (!Number.isSafeInteger(manifest.pageSize) || manifest.pageSize <= 0
+    || manifest.consistency !== "best-effort"
+    || typeof manifest.indexed !== "boolean"
+    || !isIsoDate(manifest.completedAt)) {
+    throw new Error("チャンク型スナップショットのマニフェストが不正です。");
+  }
   const fileNames = new Set<string>();
   let rowCount = 0;
   let storageBytes = 0;
-  for (const chunk of manifest.chunks) {
-    if (!/^chunk-\d{6}\.json$/.test(chunk.fileName)
+  for (const [index, chunk] of manifest.chunks.entries()) {
+    if (!chunk || typeof chunk !== "object"
+      || chunk.fileName !== `chunk-${String(index).padStart(6, "0")}.json`
       || fileNames.has(chunk.fileName)
       || !Number.isSafeInteger(chunk.rowCount)
-      || chunk.rowCount < 0
+      || chunk.rowCount <= 0
       || !Number.isSafeInteger(chunk.byteLength)
-      || chunk.byteLength < 0) {
+      || chunk.byteLength <= 0
+      || !isSha256(chunk.contentHash)) {
       throw new Error("チャンク型スナップショットの索引が不正です。");
     }
     fileNames.add(chunk.fileName);
     rowCount += chunk.rowCount;
     storageBytes += chunk.byteLength;
+    if (!Number.isSafeInteger(rowCount) || !Number.isSafeInteger(storageBytes)) {
+      throw new Error("チャンク型スナップショットの行数または容量が不正です。");
+    }
   }
   if (rowCount !== manifest.rowCount || storageBytes !== manifest.storageBytes) {
     throw new Error("チャンク型スナップショットの行数または容量が一致しません。");
   }
+}
+
+function validateMetadata(metadata: TableSnapshotMetadata): void {
+  if (typeof metadata.profileId !== "string"
+    || typeof metadata.profileName !== "string"
+    || !isIsoDate(metadata.createdAt)
+    || !isDbObject(metadata.object)
+    || !isStringArray(metadata.columns)
+    || !Array.isArray(metadata.columnTypes)
+    || metadata.columnTypes.length !== metadata.columns.length
+    || !metadata.columnTypes.every(isColumnType)
+    || !isStringArray(metadata.primaryKeys)
+    || !isStringArray(metadata.excludedColumns)
+    || !Number.isSafeInteger(metadata.rowCount)
+    || metadata.rowCount < 0
+    || !isSha256(metadata.contentFingerprint)) {
+    throw new Error("スナップショットのマニフェストが不正です。");
+  }
+  const columns = new Set(metadata.columns.map(normalize));
+  if (columns.size !== metadata.columns.length
+    || metadata.columnTypes.some((column, index) => normalize(column.name) !== normalize(metadata.columns[index]))) {
+    throw new Error("スナップショットの列構成が不正です。");
+  }
+  const primaryKeys = new Set(metadata.primaryKeys.map(normalize));
+  const excludedColumns = new Set(metadata.excludedColumns.map(normalize));
+  if (primaryKeys.size !== metadata.primaryKeys.length
+    || metadata.primaryKeys.some((column) => !columns.has(normalize(column)))) {
+    throw new Error("スナップショットの主キー構成が不正です。");
+  }
+  if (excludedColumns.size !== metadata.excludedColumns.length
+    || metadata.excludedColumns.some((column) => columns.has(normalize(column)))) {
+    throw new Error("スナップショットの除外列構成が不正です。");
+  }
+}
+
+function validateChunkRows(
+  value: unknown,
+  chunk: SnapshotChunkDescriptor,
+  columnCount: number
+): asserts value is SnapshotCell[][] {
+  if (!Array.isArray(value) || value.length !== chunk.rowCount) {
+    throw new Error(`スナップショットチャンク ${chunk.fileName} の行数が一致しません。`);
+  }
+  validateRows(value, columnCount, `スナップショットチャンク ${chunk.fileName}`);
+}
+
+function validateRows(rows: unknown[], columnCount: number, label: string): asserts rows is SnapshotCell[][] {
+  for (const row of rows) {
+    if (!Array.isArray(row)
+      || row.length !== columnCount
+      || row.some((cell) => !isSnapshotCell(cell))) {
+      throw new Error(`${label} の行データ形式が不正です。`);
+    }
+  }
+}
+
+function isSnapshotCell(value: unknown): value is SnapshotCell {
+  return value === null
+    || typeof value === "string"
+    || typeof value === "boolean"
+    || (typeof value === "number" && Number.isFinite(value));
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isColumnType(value: unknown): boolean {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const column = value as Record<string, unknown>;
+  return typeof column.name === "string"
+    && (column.typeName === null || typeof column.typeName === "string")
+    && (column.jdbcType === null || Number.isSafeInteger(column.jdbcType));
+}
+
+function isDbObject(value: unknown): value is DbObject {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const object = value as Record<string, unknown>;
+  return (object.schema === null || typeof object.schema === "string")
+    && typeof object.name === "string"
+    && (object.type === "TABLE" || object.type === "VIEW");
+}
+
+function isIsoDate(value: unknown): value is string {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+
+function isSha256(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{64}$/i.test(value);
 }
 
 async function isTemporarySnapshotDirectory(directory: string): Promise<boolean> {
@@ -455,4 +638,19 @@ function normalize(value: string): string {
 
 function formatBytes(value: number): string {
   return `${Math.ceil(value / (1024 * 1024))} MiB`;
+}
+
+async function withIndexMutation<T>(rootDirectory: string, action: () => Promise<T>): Promise<T> {
+  const key = path.resolve(rootDirectory);
+  const previous = indexMutationTails.get(key) ?? Promise.resolve();
+  const result = previous.catch(() => undefined).then(action);
+  const tail = result.then(() => undefined, () => undefined);
+  indexMutationTails.set(key, tail);
+  try {
+    return await result;
+  } finally {
+    if (indexMutationTails.get(key) === tail) {
+      indexMutationTails.delete(key);
+    }
+  }
 }
