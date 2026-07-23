@@ -113,6 +113,30 @@ test("keeps non-Oracle date and timestamp values as standard string literals", (
   );
 });
 
+test("formats SQL Server identifiers, Unicode strings, bits, and binary values", () => {
+  const sqlServerData: ObjectData = {
+    columns: ["ID", "DISPLAY_NAME", "ACTIVE", "ITEM_ID", "PAYLOAD", "CREATED_AT"],
+    columnTypes: [
+      { name: "ID", typeName: "int", jdbcType: 4 },
+      { name: "DISPLAY_NAME", typeName: "nvarchar", jdbcType: -9 },
+      { name: "ACTIVE", typeName: "bit", jdbcType: -7 },
+      { name: "ITEM_ID", typeName: "uniqueidentifier", jdbcType: 1 },
+      { name: "PAYLOAD", typeName: "varbinary", jdbcType: -3 },
+      { name: "CREATED_AT", typeName: "datetimeoffset", jdbcType: -155 }
+    ],
+    rows: [[1, "O'Reilly", true, "12345678-1234-1234-1234-1234567890ab", "base64:AQKg/w==", "2026-07-22T10:20:30+09:00"]],
+    limit: 100,
+    offset: 0,
+    hasPrevious: false,
+    hasNext: false
+  };
+
+  assert.equal(
+    toInsertSql(sqlServerData, { schema: "dbo", name: "Order]Detail", type: "TABLE" }, "\"", [0], "sqlserver"),
+    "INSERT INTO [dbo].[Order]]Detail] ([ID], [DISPLAY_NAME], [ACTIVE], [ITEM_ID], [PAYLOAD], [CREATED_AT]) VALUES (1, N'O''Reilly', 1, '12345678-1234-1234-1234-1234567890ab', 0x0102A0FF, '2026-07-22T10:20:30+09:00');"
+  );
+});
+
 test("formats selected rows as INSERT SQL", () => {
   assert.equal(
     toInsertSql(data, object, "\"", [1]),

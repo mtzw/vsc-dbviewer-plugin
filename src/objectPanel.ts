@@ -1,20 +1,46 @@
 import * as vscode from "vscode";
 import * as fs from "node:fs";
 import { toExportCsv, toExportTsv, toInsertSql, toTsv } from "./copyFormat";
+import { buildDeleteRowsPreview, DeleteRowsPreview } from "./deleteRows";
+import { DEFAULT_DIFF_VIEW_QUERY, DiffStatusFilter, DiffViewQuery, getDiffRow, selectDiffViewPage } from "./diffView";
 import { JdbcClient } from "./jdbcClient";
 import { ProfileStore } from "./profileStore";
-import { DbObject, ObjectData, ObjectDdl, ObjectInfo, ConnectionProfile } from "./types";
+import { captureChunkedTableSnapshot } from "./snapshotCapture";
+import { compareStoredSnapshots } from "./snapshotComparison";
+import { SnapshotStore } from "./snapshotStore";
+import { SnapshotDescriptor, TableDiff, tableDiffToCsv, tableDiffToJson } from "./tableDiff";
+import { buildTsvInsertPreview, TsvInsertPreview } from "./tsvInsert";
+import { DbObject, ObjectData, ObjectDdl, ObjectInfo, ConnectionProfile, DeleteRowsResult, InsertRowsResult, UpdateRowsResult } from "./types";
+import { buildUpdateRowsPreview, UpdateRowsInput, UpdateRowsPreview } from "./updateRows";
+import { isWritableColumn, normalizeTemporalInputValue, updateInputType, validationColumns, ValidationColumn } from "./valueValidation";
 
 type ExportFormat = "csv" | "tsv" | "insert";
+type DiffExportFormat = "csv" | "json";
 type SortDirection = "ASC" | "DESC";
+type ObjectPanelTab = "info" | "constraints" | "indexes" | "data" | "diff" | "ddl";
 interface DataQuery {
   where: string;
   sortColumn: string | null;
   sortDirection: SortDirection;
 }
 
+interface SnapshotPanelState {
+  snapshots: SnapshotDescriptor[];
+  selectedSnapshotId?: string;
+  diff?: TableDiff;
+  diffView: DiffViewQuery;
+  selectedDiffRowIndex?: number;
+}
+
 const EXPORT_PAGE_SIZE = 1000;
 const DATA_PAGE_SIZE = 100;
+const SNAPSHOT_PAGE_SIZE = 1000;
+const SNAPSHOT_MAX_ROWS = 5_000_000;
+const SNAPSHOT_MAX_BYTES = 512 * 1024 * 1024;
+const SNAPSHOT_DETAIL_MAX_ROWS = 100_000;
+const SNAPSHOT_DETAIL_MAX_BYTES = 128 * 1024 * 1024;
+const SNAPSHOT_RETENTION_DAYS = 30;
+const DIFF_PAGE_SIZE = 50;
 
 export class ObjectPanel {
   static async open(
@@ -44,7 +70,35 @@ export class ObjectPanel {
       let query: DataQuery = { where: "", sortColumn: null, sortDirection: "ASC" };
       const firstPage = await loadObjectData(client, profile, password, object, query, 0, DATA_PAGE_SIZE);
       let currentData = firstPage;
-      panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "info", query);
+      let tsvInsertPreview: TsvInsertPreview | undefined;
+      let deleteRowsPreview: DeleteRowsPreview | undefined;
+      let updateRowsPreview: UpdateRowsPreview | undefined;
+      const snapshotStore = new SnapshotStore(vscode.Uri.joinPath(context.globalStorageUri, "snapshots").fsPath);
+      if (object.type === "TABLE") {
+        await snapshotStore.prune(SNAPSHOT_RETENTION_DAYS);
+      }
+      const savedSnapshots = object.type === "TABLE" ? await snapshotStore.list(profile.id, object) : [];
+      let snapshotState: SnapshotPanelState = {
+        snapshots: savedSnapshots,
+        selectedSnapshotId: savedSnapshots[0]?.id,
+        diffView: { ...DEFAULT_DIFF_VIEW_QUERY }
+      };
+      const render = (activeTab: ObjectPanelTab): void => {
+        panel.webview.html = renderObject(
+          profile,
+          object,
+          info,
+          currentData,
+          ddl,
+          activeTab,
+          query,
+          snapshotState,
+          tsvInsertPreview,
+          deleteRowsPreview,
+          updateRowsPreview
+        );
+      };
+      render("info");
 
       panel.webview.onDidReceiveMessage(async (message: WebviewMessage) => {
         try {
@@ -59,31 +113,40 @@ export class ObjectPanel {
               offset: 0,
               hasPrevious: false
             };
-            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query);
+            render("data");
             return;
           }
 
           if (message.type === "reload") {
+            tsvInsertPreview = undefined;
+            deleteRowsPreview = undefined;
+            updateRowsPreview = undefined;
             currentData = await loadObjectData(client, profile, password, object, query, 0, currentData.limit);
-            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query);
+            render("data");
             return;
           }
 
           if (message.type === "search") {
+            tsvInsertPreview = undefined;
+            deleteRowsPreview = undefined;
+            updateRowsPreview = undefined;
             query = { ...query, where: message.where.trim() };
             currentData = await loadObjectData(client, profile, password, object, query, 0, currentData.limit);
-            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query);
+            render("data");
             return;
           }
 
           if (message.type === "sort") {
+            tsvInsertPreview = undefined;
+            deleteRowsPreview = undefined;
+            updateRowsPreview = undefined;
             query = {
               ...query,
               sortColumn: message.column,
               sortDirection: query.sortColumn === message.column && query.sortDirection === "ASC" ? "DESC" : "ASC"
             };
             currentData = await loadObjectData(client, profile, password, object, query, 0, currentData.limit);
-            panel.webview.html = renderObject(context, panel.webview, profile, object, info, currentData, ddl, "data", query);
+            render("data");
             return;
           }
 
@@ -103,6 +166,225 @@ export class ObjectPanel {
 
           if (message.type === "export") {
             await exportObject(client, profile, password, object, info, message.format, query);
+            return;
+          }
+
+          if (message.type === "createSnapshot") {
+            if (object.type !== "TABLE") {
+              throw new Error("スナップショットはTableのみ作成できます。");
+            }
+            const confirmed = await vscode.window.showWarningMessage(
+              `TableデータをVS Codeの拡張用保存領域に${SNAPSHOT_RETENTION_DAYS}日間保存します。LOB・バイナリ列は除外されますが、その他の機微情報が含まれる可能性があります。`,
+              { modal: true },
+              "スナップショットを保存"
+            );
+            if (!confirmed) {
+              return;
+            }
+            const snapshot = await captureTableSnapshot(snapshotStore, client, profile, password, object, true);
+            if (!snapshot) {
+              return;
+            }
+            const snapshots = await snapshotStore.list(profile.id, object);
+            snapshotState = {
+              snapshots,
+              selectedSnapshotId: snapshot.id,
+              diffView: { ...DEFAULT_DIFF_VIEW_QUERY }
+            };
+            render("diff");
+            vscode.window.showInformationMessage(`${object.name}: ${snapshot.rowCount} row(s)のスナップショットを保存しました。`);
+            return;
+          }
+
+          if (message.type === "compareSnapshot") {
+            if (!snapshotState.snapshots.some((snapshot) => snapshot.id === message.snapshotId)) {
+              throw new Error("比較対象のスナップショットが見つかりません。");
+            }
+            const after = await captureTableSnapshot(snapshotStore, client, profile, password, object, false);
+            if (!after) {
+              return;
+            }
+            try {
+              snapshotState = {
+                ...snapshotState,
+                selectedSnapshotId: message.snapshotId,
+                diffView: { ...DEFAULT_DIFF_VIEW_QUERY },
+                selectedDiffRowIndex: undefined,
+                diff: await compareStoredSnapshots(snapshotStore, message.snapshotId, after.id, {
+                  maxDetailRowsPerSnapshot: SNAPSHOT_DETAIL_MAX_ROWS,
+                  maxDetailBytesPerSnapshot: SNAPSHOT_DETAIL_MAX_BYTES
+                })
+              };
+              render("diff");
+            } finally {
+              await snapshotStore.delete(after.id);
+            }
+            return;
+          }
+
+          if (message.type === "deleteSnapshot") {
+            const descriptor = snapshotState.snapshots.find((snapshot) => snapshot.id === message.snapshotId);
+            if (!descriptor) {
+              throw new Error("削除対象のスナップショットが見つかりません。");
+            }
+            const confirmed = await vscode.window.showWarningMessage(
+              `${formatSnapshotDate(descriptor.createdAt)} のスナップショットを削除します。`,
+              { modal: true },
+              "削除"
+            );
+            if (!confirmed) {
+              return;
+            }
+            await snapshotStore.delete(descriptor.id);
+            const snapshots = await snapshotStore.list(profile.id, object);
+            snapshotState = {
+              snapshots,
+              selectedSnapshotId: snapshots[0]?.id,
+              diff: snapshotState.diff?.baselineSnapshotId === descriptor.id ? undefined : snapshotState.diff,
+              diffView: snapshotState.diff?.baselineSnapshotId === descriptor.id
+                ? { ...DEFAULT_DIFF_VIEW_QUERY }
+                : snapshotState.diffView,
+              selectedDiffRowIndex: undefined
+            };
+            render("diff");
+            return;
+          }
+
+          if (message.type === "exportDiff") {
+            if (!snapshotState.diff) {
+              throw new Error("先にスナップショットを比較してください。");
+            }
+            await exportTableDiff(object, snapshotState.diff, message.format);
+            return;
+          }
+
+          if (message.type === "updateDiffView") {
+            if (!snapshotState.diff) {
+              return;
+            }
+            snapshotState = {
+              ...snapshotState,
+              diffView: {
+                page: Math.max(1, Math.trunc(message.page) || 1),
+                status: normalizeDiffStatus(message.status),
+                keyQuery: message.keyQuery.slice(0, 200),
+                columnQuery: message.columnQuery.slice(0, 200)
+              },
+              selectedDiffRowIndex: undefined
+            };
+            render("diff");
+            return;
+          }
+
+          if (message.type === "openDiffRow") {
+            if (!snapshotState.diff || !getDiffRow(snapshotState.diff, message.rowIndex)) {
+              throw new Error("表示する差分行が見つかりません。");
+            }
+            snapshotState = { ...snapshotState, selectedDiffRowIndex: message.rowIndex };
+            render("diff");
+            return;
+          }
+
+          if (message.type === "closeDiffRow") {
+            snapshotState = { ...snapshotState, selectedDiffRowIndex: undefined };
+            render("diff");
+            return;
+          }
+
+          if (message.type === "previewTsvInsert") {
+            tsvInsertPreview = buildTsvInsertPreview(object, info, message.tsv);
+            deleteRowsPreview = undefined;
+            updateRowsPreview = undefined;
+            render("data");
+            return;
+          }
+
+          if (message.type === "cancelTsvInsert") {
+            tsvInsertPreview = undefined;
+            render("data");
+            return;
+          }
+
+          if (message.type === "confirmTsvInsert") {
+            if (!tsvInsertPreview || tsvInsertPreview.errors.length > 0) {
+              vscode.window.showErrorMessage("TSV Insertのプレビューを確認してください。");
+              return;
+            }
+            const result = await client.request<InsertRowsResult>(profile, password, "insertRows", {
+              object,
+              columns: tsvInsertPreview.columns,
+              rows: tsvInsertPreview.rows
+            });
+            vscode.window.showInformationMessage(`${result.insertedRows} row(s) inserted into ${object.name}.`);
+            tsvInsertPreview = undefined;
+            snapshotState = { ...snapshotState, diff: undefined };
+            currentData = await loadObjectData(client, profile, password, object, query, 0, currentData.limit);
+            render("data");
+            return;
+          }
+
+          if (message.type === "previewDeleteRows") {
+            deleteRowsPreview = buildDeleteRowsPreview(object, info, currentData, message.rowIndexes);
+            tsvInsertPreview = undefined;
+            updateRowsPreview = undefined;
+            render("data");
+            return;
+          }
+
+          if (message.type === "cancelDeleteRows") {
+            deleteRowsPreview = undefined;
+            render("data");
+            return;
+          }
+
+          if (message.type === "confirmDeleteRows") {
+            if (!deleteRowsPreview || deleteRowsPreview.errors.length > 0) {
+              vscode.window.showErrorMessage("削除プレビューを確認してください。");
+              return;
+            }
+            const result = await client.request<DeleteRowsResult>(profile, password, "deleteRows", {
+              object,
+              primaryKeyColumns: deleteRowsPreview.primaryKeyColumns,
+              rows: deleteRowsPreview.rows
+            });
+            vscode.window.showInformationMessage(`${result.deletedRows} row(s) deleted from ${object.name}.`);
+            deleteRowsPreview = undefined;
+            snapshotState = { ...snapshotState, diff: undefined };
+            currentData = await loadObjectData(client, profile, password, object, query, 0, currentData.limit);
+            render("data");
+            return;
+          }
+
+          if (message.type === "previewUpdateRows") {
+            updateRowsPreview = buildUpdateRowsPreview(object, info, currentData, message.rows);
+            tsvInsertPreview = undefined;
+            deleteRowsPreview = undefined;
+            render("data");
+            return;
+          }
+
+          if (message.type === "cancelUpdateRows") {
+            updateRowsPreview = undefined;
+            render("data");
+            return;
+          }
+
+          if (message.type === "confirmUpdateRows") {
+            if (!updateRowsPreview || updateRowsPreview.errors.length > 0) {
+              vscode.window.showErrorMessage("Updateプレビューを確認してください。");
+              return;
+            }
+            const result = await client.request<UpdateRowsResult>(profile, password, "updateRows", {
+              object,
+              updateColumns: updateRowsPreview.updateColumns,
+              primaryKeyColumns: updateRowsPreview.primaryKeyColumns,
+              rows: updateRowsPreview.rows.map((row) => [...row.values, ...row.primaryKeyValues])
+            });
+            vscode.window.showInformationMessage(`${result.updatedRows} row(s) updated in ${object.name}.`);
+            updateRowsPreview = undefined;
+            snapshotState = { ...snapshotState, diff: undefined };
+            currentData = await loadObjectData(client, profile, password, object, query, 0, currentData.limit);
+            render("data");
           }
         } catch (error) {
           vscode.window.showErrorMessage((error as Error).message);
@@ -120,7 +402,23 @@ type WebviewMessage =
   | { type: "search"; where: string }
   | { type: "sort"; column: string }
   | { type: "copy"; format: "tsv" | "insert"; rowIndexes: number[] }
-  | { type: "export"; format: ExportFormat };
+  | { type: "export"; format: ExportFormat }
+  | { type: "createSnapshot" }
+  | { type: "compareSnapshot"; snapshotId: string }
+  | { type: "deleteSnapshot"; snapshotId: string }
+  | { type: "exportDiff"; format: DiffExportFormat }
+  | { type: "updateDiffView"; page: number; status: DiffStatusFilter; keyQuery: string; columnQuery: string }
+  | { type: "openDiffRow"; rowIndex: number }
+  | { type: "closeDiffRow" }
+  | { type: "previewTsvInsert"; tsv: string }
+  | { type: "cancelTsvInsert" }
+  | { type: "confirmTsvInsert" }
+  | { type: "previewDeleteRows"; rowIndexes: number[] }
+  | { type: "cancelDeleteRows" }
+  | { type: "confirmDeleteRows" }
+  | { type: "previewUpdateRows"; rows: UpdateRowsInput[] }
+  | { type: "cancelUpdateRows" }
+  | { type: "confirmUpdateRows" };
 
 async function loadObjectData(
   client: JdbcClient,
@@ -139,6 +437,88 @@ async function loadObjectData(
     sortColumn: query.sortColumn ?? undefined,
     sortDirection: query.sortColumn ? query.sortDirection : undefined
   });
+}
+
+async function captureTableSnapshot(
+  snapshotStore: SnapshotStore,
+  client: JdbcClient,
+  profile: ConnectionProfile,
+  password: string,
+  object: DbObject,
+  indexed: boolean
+): Promise<SnapshotDescriptor | undefined> {
+  return vscode.window.withProgress(
+    {
+      location: vscode.ProgressLocation.Notification,
+      title: `Snapshot: ${object.name}`,
+      cancellable: true
+    },
+    async (progress, token) => {
+      const currentInfo = await client.request<ObjectInfo>(profile, password, "getObjectInfo", { object });
+      const snapshotQuery: DataQuery = {
+        where: "",
+        sortColumn: null,
+        sortDirection: "ASC"
+      };
+
+      const snapshot = await captureChunkedTableSnapshot({
+        store: snapshotStore,
+        profile,
+        object,
+        info: currentInfo,
+        indexed,
+        limits: {
+          pageSize: SNAPSHOT_PAGE_SIZE,
+          maxRows: SNAPSHOT_MAX_ROWS,
+          maxBytes: SNAPSHOT_MAX_BYTES
+        },
+        loadPage: (offset, limit) => loadObjectData(client, profile, password, object, snapshotQuery, offset, limit),
+        isCancellationRequested: () => token.isCancellationRequested,
+        onProgress: (current) => progress.report({
+          message: `${current.rowCount.toLocaleString()} rows / ${formatBytes(current.storageBytes)} / ${current.chunkCount} chunks`
+        })
+      });
+      if (!snapshot) {
+        vscode.window.showWarningMessage(`${object.name} のスナップショット取得をキャンセルしました。不完全なチャンクは削除しました。`);
+      }
+      return snapshot;
+    }
+  );
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024 * 1024) {
+    return `${Math.ceil(value / 1024)} KiB`;
+  }
+  return `${Math.ceil(value / (1024 * 1024))} MiB`;
+}
+
+function normalizeDiffStatus(value: string): DiffStatusFilter {
+  return value === "ADDED" || value === "REMOVED" || value === "UPDATED" ? value : "ALL";
+}
+
+async function exportTableDiff(object: DbObject, diff: TableDiff, format: DiffExportFormat): Promise<void> {
+  const target = await vscode.window.showSaveDialog({
+    defaultUri: defaultDiffExportUri(object, format),
+    filters: format === "json" ? { JSON: ["json"] } : { CSV: ["csv"] },
+    saveLabel: "Export Diff"
+  });
+  if (!target) {
+    return;
+  }
+  if (target.scheme !== "file") {
+    throw new Error("ローカルファイルとして保存できる場所を選択してください。");
+  }
+  const content = format === "json" ? tableDiffToJson(diff) : tableDiffToCsv(diff);
+  await fs.promises.writeFile(target.fsPath, content, { encoding: "utf8", mode: 0o600 });
+  vscode.window.showInformationMessage(`差分を ${target.fsPath} に保存しました。`);
+}
+
+function defaultDiffExportUri(object: DbObject, format: DiffExportFormat): vscode.Uri | undefined {
+  const schema = object.schema ? `${sanitizeFileName(object.schema)}.` : "";
+  const fileName = `${schema}${sanitizeFileName(object.name)}.diff.${format}`;
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+  return workspaceFolder ? vscode.Uri.joinPath(workspaceFolder.uri, fileName) : undefined;
 }
 
 async function exportObject(
@@ -265,15 +645,17 @@ function renderError(profile: ConnectionProfile, object: DbObject, message: stri
 }
 
 function renderObject(
-  _context: vscode.ExtensionContext,
-  _webview: vscode.Webview,
   profile: ConnectionProfile,
   object: DbObject,
   info: ObjectInfo,
   data: ObjectData,
   ddl: ObjectDdl,
-  activeTab: "info" | "constraints" | "indexes" | "data" | "ddl",
-  query: DataQuery
+  activeTab: ObjectPanelTab,
+  query: DataQuery,
+  snapshotState: SnapshotPanelState,
+  tsvInsertPreview?: TsvInsertPreview,
+  deleteRowsPreview?: DeleteRowsPreview,
+  updateRowsPreview?: UpdateRowsPreview
 ): string {
   const nonce = createNonce();
   const content = `
@@ -282,6 +664,7 @@ function renderObject(
       <button class="tab ${activeTab === "constraints" ? "active" : ""}" data-tab="constraints" type="button">制約</button>
       <button class="tab ${activeTab === "indexes" ? "active" : ""}" data-tab="indexes" type="button">インデックス</button>
       <button class="tab ${activeTab === "data" ? "active" : ""}" data-tab="data" type="button">データ</button>
+      ${object.type === "TABLE" ? `<button class="tab ${activeTab === "diff" ? "active" : ""}" data-tab="diff" type="button">差分</button>` : ""}
       <button class="tab ${activeTab === "ddl" ? "active" : ""}" data-tab="ddl" type="button">定義SQL</button>
     </div>
     <section id="info" class="panel ${activeTab === "info" ? "active" : ""}">
@@ -298,8 +681,14 @@ function renderObject(
     </section>
     <section id="data" class="panel ${activeTab === "data" ? "active" : ""}">
       <h2>Data <span class="muted">${data.rows.length} loaded</span></h2>
-      ${renderData(data, query)}
+      ${renderData(data, query, object, info, tsvInsertPreview, deleteRowsPreview, updateRowsPreview)}
     </section>
+    ${object.type === "TABLE" ? `
+      <section id="diff" class="panel ${activeTab === "diff" ? "active" : ""}">
+        <h2>Table Diff</h2>
+        ${renderTableDiff(snapshotState)}
+      </section>
+    ` : ""}
     <section id="ddl" class="panel ${activeTab === "ddl" ? "active" : ""}">
       <h2>Definition SQL</h2>
       ${ddl.ddl ? `<pre>${escapeHtml(ddl.ddl)}</pre>` : `<p class="muted">${escapeHtml(ddl.message ?? "DDL is not available for this database.")}</p>`}
@@ -319,6 +708,36 @@ function renderObject(
         const exportCsv = document.querySelector("#export-csv");
         const exportTsv = document.querySelector("#export-tsv");
         const exportInsert = document.querySelector("#export-insert");
+        const openTsvInsert = document.querySelector("#open-tsv-insert");
+        const tsvInsertModal = document.querySelector("#tsv-insert-modal");
+        const tsvInsertInput = document.querySelector("#tsv-insert-input");
+        const previewTsvInsert = document.querySelector("#preview-tsv-insert");
+        const cancelTsvInsert = document.querySelector("#cancel-tsv-insert");
+        const confirmTsvInsert = document.querySelector("#confirm-tsv-insert");
+        const previewDeleteRows = document.querySelector("#preview-delete-rows");
+        const cancelDeleteRows = document.querySelector("#cancel-delete-rows");
+        const confirmDeleteRows = document.querySelector("#confirm-delete-rows");
+        const openUpdateRows = document.querySelector("#open-update-rows");
+        const updateRowsModal = document.querySelector("#update-rows-modal");
+        const previewUpdateRows = document.querySelector("#preview-update-rows");
+        const cancelUpdateRows = document.querySelector("#cancel-update-rows");
+        const confirmUpdateRows = document.querySelector("#confirm-update-rows");
+        const snapshotSelect = document.querySelector("#snapshot-select");
+        const createSnapshot = document.querySelector("#create-snapshot");
+        const compareSnapshot = document.querySelector("#compare-snapshot");
+        const deleteSnapshot = document.querySelector("#delete-snapshot");
+        const exportDiffJson = document.querySelector("#export-diff-json");
+        const exportDiffCsv = document.querySelector("#export-diff-csv");
+        const diffStatusFilter = document.querySelector("#diff-status-filter");
+        const diffKeyFilter = document.querySelector("#diff-key-filter");
+        const diffColumnFilter = document.querySelector("#diff-column-filter");
+        const applyDiffFilter = document.querySelector("#apply-diff-filter");
+        const clearDiffFilter = document.querySelector("#clear-diff-filter");
+        const previousDiffPage = document.querySelector("#previous-diff-page");
+        const nextDiffPage = document.querySelector("#next-diff-page");
+        const diffPageInput = document.querySelector("#diff-page-input");
+        const goDiffPage = document.querySelector("#go-diff-page");
+        const closeDiffRow = document.querySelector("#close-diff-row");
         const selectAll = document.querySelector("#select-all");
         const clearSelection = document.querySelector("#clear-selection");
         const loadStatus = document.querySelector("#load-status");
@@ -337,6 +756,9 @@ function renderObject(
           selectedCount.textContent = String(count);
           copyTsv.disabled = count === 0;
           copyInsert.disabled = count === 0;
+          if (openUpdateRows) {
+            openUpdateRows.disabled = count === 0 || ${object.type === "TABLE" && info.primaryKeys.length > 0 ? "false" : "true"};
+          }
           for (const row of rows) {
             const check = row.querySelector(".row-check");
             row.classList.toggle("selected-row", Boolean(check && check.checked));
@@ -375,6 +797,123 @@ function renderObject(
         exportCsv.addEventListener("click", () => vscode.postMessage({ type: "export", format: "csv" }));
         exportTsv.addEventListener("click", () => vscode.postMessage({ type: "export", format: "tsv" }));
         exportInsert.addEventListener("click", () => vscode.postMessage({ type: "export", format: "insert" }));
+        if (openTsvInsert && tsvInsertModal && tsvInsertInput) {
+          openTsvInsert.addEventListener("click", () => {
+            tsvInsertModal.classList.add("active");
+            tsvInsertInput.focus();
+          });
+        }
+        if (previewTsvInsert && tsvInsertInput) {
+          previewTsvInsert.addEventListener("click", () => vscode.postMessage({ type: "previewTsvInsert", tsv: tsvInsertInput.value }));
+        }
+        if (cancelTsvInsert) {
+          cancelTsvInsert.addEventListener("click", () => vscode.postMessage({ type: "cancelTsvInsert" }));
+        }
+        if (confirmTsvInsert) {
+          confirmTsvInsert.addEventListener("click", () => vscode.postMessage({ type: "confirmTsvInsert" }));
+        }
+        if (previewDeleteRows) {
+          previewDeleteRows.addEventListener("click", () => vscode.postMessage({ type: "previewDeleteRows", rowIndexes: selectedRows() }));
+        }
+        if (cancelDeleteRows) {
+          cancelDeleteRows.addEventListener("click", () => vscode.postMessage({ type: "cancelDeleteRows" }));
+        }
+        if (confirmDeleteRows) {
+          confirmDeleteRows.addEventListener("click", () => vscode.postMessage({ type: "confirmDeleteRows" }));
+        }
+        if (openUpdateRows && updateRowsModal) {
+          openUpdateRows.addEventListener("click", () => {
+            const selected = new Set(selectedRows());
+            for (const row of Array.from(updateRowsModal.querySelectorAll(".update-edit-row"))) {
+              row.classList.toggle("active", selected.has(Number(row.dataset.rowIndex)));
+            }
+            updateRowsModal.classList.add("active");
+          });
+        }
+        const updateInputRows = () => Array.from(document.querySelectorAll(".update-edit-row.active")).map((row) => ({
+          rowIndex: Number(row.dataset.rowIndex),
+          values: Array.from(row.querySelectorAll(".update-input")).map((input) => {
+            if (input.classList.contains("temporal-input") && input.value === "") {
+              return null;
+            }
+            if (input.dataset.temporalKind === "time" && /^\\d{2}:\\d{2}$/.test(input.value)) {
+              return input.value + ":00";
+            }
+            if (input.dataset.temporalKind === "datetime-local" && /^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}$/.test(input.value)) {
+              return input.value + ":00";
+            }
+            return input.value === "\\\\N" ? null : input.value;
+          })
+        }));
+        if (previewUpdateRows) {
+          previewUpdateRows.addEventListener("click", () => vscode.postMessage({ type: "previewUpdateRows", rows: updateInputRows() }));
+        }
+        if (cancelUpdateRows) {
+          cancelUpdateRows.addEventListener("click", () => vscode.postMessage({ type: "cancelUpdateRows" }));
+        }
+        if (confirmUpdateRows) {
+          confirmUpdateRows.addEventListener("click", () => vscode.postMessage({ type: "confirmUpdateRows" }));
+        }
+        if (createSnapshot) {
+          createSnapshot.addEventListener("click", () => vscode.postMessage({ type: "createSnapshot" }));
+        }
+        if (compareSnapshot && snapshotSelect) {
+          compareSnapshot.addEventListener("click", () => vscode.postMessage({ type: "compareSnapshot", snapshotId: snapshotSelect.value }));
+        }
+        if (deleteSnapshot && snapshotSelect) {
+          deleteSnapshot.addEventListener("click", () => vscode.postMessage({ type: "deleteSnapshot", snapshotId: snapshotSelect.value }));
+        }
+        if (exportDiffJson) {
+          exportDiffJson.addEventListener("click", () => vscode.postMessage({ type: "exportDiff", format: "json" }));
+        }
+        if (exportDiffCsv) {
+          exportDiffCsv.addEventListener("click", () => vscode.postMessage({ type: "exportDiff", format: "csv" }));
+        }
+        const postDiffView = (page) => vscode.postMessage({
+          type: "updateDiffView",
+          page,
+          status: diffStatusFilter ? diffStatusFilter.value : "ALL",
+          keyQuery: diffKeyFilter ? diffKeyFilter.value : "",
+          columnQuery: diffColumnFilter ? diffColumnFilter.value : ""
+        });
+        if (applyDiffFilter) {
+          applyDiffFilter.addEventListener("click", () => postDiffView(1));
+        }
+        if (clearDiffFilter) {
+          clearDiffFilter.addEventListener("click", () => {
+            if (diffStatusFilter) diffStatusFilter.value = "ALL";
+            if (diffKeyFilter) diffKeyFilter.value = "";
+            if (diffColumnFilter) diffColumnFilter.value = "";
+            postDiffView(1);
+          });
+        }
+        for (const input of [diffKeyFilter, diffColumnFilter]) {
+          if (input) {
+            input.addEventListener("keydown", (event) => {
+              if (event.key === "Enter") postDiffView(1);
+            });
+          }
+        }
+        if (previousDiffPage && diffPageInput) {
+          previousDiffPage.addEventListener("click", () => postDiffView(Number(diffPageInput.value) - 1));
+        }
+        if (nextDiffPage && diffPageInput) {
+          nextDiffPage.addEventListener("click", () => postDiffView(Number(diffPageInput.value) + 1));
+        }
+        if (goDiffPage && diffPageInput) {
+          goDiffPage.addEventListener("click", () => postDiffView(Number(diffPageInput.value)));
+        }
+        if (diffPageInput) {
+          diffPageInput.addEventListener("keydown", (event) => {
+            if (event.key === "Enter") postDiffView(Number(diffPageInput.value));
+          });
+        }
+        for (const button of Array.from(document.querySelectorAll(".open-diff-row"))) {
+          button.addEventListener("click", () => vscode.postMessage({ type: "openDiffRow", rowIndex: Number(button.dataset.rowIndex) }));
+        }
+        if (closeDiffRow) {
+          closeDiffRow.addEventListener("click", () => vscode.postMessage({ type: "closeDiffRow" }));
+        }
         reloadData.addEventListener("click", () => vscode.postMessage({ type: "reload" }));
         applySearch.addEventListener("click", () => vscode.postMessage({ type: "search", where: whereInput.value }));
         clearSearch.addEventListener("click", () => {
@@ -407,6 +946,152 @@ function renderObject(
   return shell(profile, object, content, nonce);
 }
 
+function renderTableDiff(state: SnapshotPanelState): string {
+  const hasSnapshots = state.snapshots.length > 0;
+  const options = state.snapshots.map((snapshot) => {
+    const excluded = snapshot.excludedColumns.length > 0 ? ` / excluded ${snapshot.excludedColumns.length}` : "";
+    const storage = snapshot.storageBytes !== undefined ? ` / ${formatBytes(snapshot.storageBytes)}` : "";
+    const chunks = snapshot.chunkCount !== undefined ? ` / ${snapshot.chunkCount} chunks` : "";
+    return `<option value="${escapeHtml(snapshot.id)}" ${snapshot.id === state.selectedSnapshotId ? "selected" : ""}>${escapeHtml(formatSnapshotDate(snapshot.createdAt))} / ${snapshot.rowCount.toLocaleString()} rows${storage}${chunks}${excluded}</option>`;
+  }).join("");
+  const diff = state.diff;
+  const page = diff ? selectDiffViewPage(diff, state.diffView, DIFF_PAGE_SIZE) : undefined;
+  const previewRows = page?.rows.map(({ row, sourceIndex }) => `
+    <tr>
+      <td><span class="diff-status ${row.status.toLowerCase()}">${row.status}</span></td>
+      <td>${escapeHtml(JSON.stringify(row.key))}</td>
+      <td>${escapeHtml(row.changedColumns.join(", "))}</td>
+      <td class="diff-json">${escapeHtml(row.before ? JSON.stringify(row.before) : "")}</td>
+      <td class="diff-json">${escapeHtml(row.after ? JSON.stringify(row.after) : "")}</td>
+      <td><button class="open-diff-row" type="button" data-row-index="${sourceIndex}">Details</button></td>
+    </tr>
+  `).join("") ?? "";
+  const previewBody = previewRows || `<tr><td colspan="6" class="muted">${diff ? "条件に一致する行単位の変更はありません。" : "スナップショットを選択して比較してください。"}</td></tr>`;
+  const classificationNotice = diff && !diff.rowClassificationAvailable
+    ? `<p class="muted">${diff.rowClassificationReason === "detail-limit"
+      ? `詳細比較の安全上限（各${SNAPSHOT_DETAIL_MAX_ROWS.toLocaleString()}行、${formatBytes(SNAPSHOT_DETAIL_MAX_BYTES)}）を超えたため`
+      : diff.schemaChanged ? "列または主キー構成が変化したため" : "主キーを取得できないため"}、行単位の追加・削除・更新分類は行いません。件数と内容フィンガープリントのみ比較しています。</p>`
+    : "";
+  const excludedNotice = diff?.excludedColumns.length
+    ? `<p class="muted">除外列: ${escapeHtml(diff.excludedColumns.join(", "))}</p>`
+    : "";
+  const detailRow = diff && state.selectedDiffRowIndex !== undefined
+    ? getDiffRow(diff, state.selectedDiffRowIndex)
+    : undefined;
+
+  return `
+    <p class="muted">変更前のデータをページ単位のチャンクへ保存し、変更後の再取得結果と比較します。スナップショットは拡張用保存領域に${SNAPSHOT_RETENTION_DAYS}日間保持され、LOB・バイナリ列は保存しません。上限は${SNAPSHOT_MAX_ROWS.toLocaleString()}行または${formatBytes(SNAPSHOT_MAX_BYTES)}です。</p>
+    <div class="data-toolbar">
+      <div class="toolbar-group">
+        <button id="create-snapshot" type="button">Save Snapshot</button>
+      </div>
+      <div class="toolbar-group">
+        <select id="snapshot-select" ${hasSnapshots ? "" : "disabled"} aria-label="Snapshot">${options || "<option>保存済みスナップショットなし</option>"}</select>
+        <button id="compare-snapshot" type="button" ${hasSnapshots ? "" : "disabled"}>Compare Current</button>
+        <button id="delete-snapshot" type="button" ${hasSnapshots ? "" : "disabled"}>Delete</button>
+      </div>
+      <div class="toolbar-group">
+        <button id="export-diff-json" type="button" ${diff ? "" : "disabled"}>Save JSON</button>
+        <button id="export-diff-csv" type="button" ${diff ? "" : "disabled"}>Save CSV</button>
+      </div>
+    </div>
+    ${diff ? `
+      <div class="diff-summary">
+        <div><strong>${diff.changed ? "Changed" : "No change"}</strong><span>Result</span></div>
+        <div><strong>${diff.beforeRowCount.toLocaleString()} → ${diff.afterRowCount.toLocaleString()}</strong><span>Rows</span></div>
+        <div><strong>${diff.rowClassificationAvailable ? diff.addedRows.length.toLocaleString() : "-"}</strong><span>Added</span></div>
+        <div><strong>${diff.rowClassificationAvailable ? diff.removedRows.length.toLocaleString() : "-"}</strong><span>Removed</span></div>
+        <div><strong>${diff.rowClassificationAvailable ? diff.updatedRows.length.toLocaleString() : "-"}</strong><span>Updated</span></div>
+      </div>
+      ${classificationNotice}
+      ${excludedNotice}
+      <p class="muted">比較元: ${escapeHtml(formatSnapshotDate(diff.beforeCreatedAt))} / 比較日時: ${escapeHtml(formatSnapshotDate(diff.comparedAt))}</p>
+      ${page ? `
+        <div class="diff-filter">
+          <label>Status
+            <select id="diff-status-filter">
+              ${renderDiffStatusOption("ALL", "All", state.diffView.status)}
+              ${renderDiffStatusOption("ADDED", "Added", state.diffView.status)}
+              ${renderDiffStatusOption("REMOVED", "Removed", state.diffView.status)}
+              ${renderDiffStatusOption("UPDATED", "Updated", state.diffView.status)}
+            </select>
+          </label>
+          <label>Primary Key
+            <input id="diff-key-filter" type="text" value="${escapeHtml(state.diffView.keyQuery)}" placeholder="主キーを検索">
+          </label>
+          <label>Changed Column
+            <input id="diff-column-filter" type="text" value="${escapeHtml(state.diffView.columnQuery)}" placeholder="変更列を検索">
+          </label>
+          <button id="apply-diff-filter" type="button">Apply</button>
+          <button id="clear-diff-filter" type="button">Clear</button>
+        </div>
+        <div class="diff-pagination">
+          <span>${page.firstRowNumber.toLocaleString()}–${page.lastRowNumber.toLocaleString()} / ${page.filteredRows.toLocaleString()}件${page.filteredRows !== page.totalRows ? `（全${page.totalRows.toLocaleString()}件）` : ""}</span>
+          <button id="previous-diff-page" type="button" ${page.page <= 1 ? "disabled" : ""}>前へ</button>
+          <label>Page <input id="diff-page-input" type="number" min="1" max="${page.pageCount}" value="${page.page}"></label>
+          <span>/ ${page.pageCount.toLocaleString()}</span>
+          <button id="go-diff-page" type="button">移動</button>
+          <button id="next-diff-page" type="button" ${page.page >= page.pageCount ? "disabled" : ""}>次へ</button>
+        </div>
+      ` : ""}
+    ` : ""}
+    <div class="preview-table diff-preview">
+      <table>
+        <thead><tr><th>Status</th><th>Primary Key</th><th>Changed Columns</th><th>Before</th><th>After</th><th></th></tr></thead>
+        <tbody>${previewBody}</tbody>
+      </table>
+    </div>
+    ${diff && detailRow ? renderDiffRowDetail(diff, detailRow) : ""}
+  `;
+}
+
+function renderDiffStatusOption(value: DiffStatusFilter, label: string, selected: DiffStatusFilter): string {
+  return `<option value="${value}" ${value === selected ? "selected" : ""}>${label}</option>`;
+}
+
+function renderDiffRowDetail(diff: TableDiff, row: NonNullable<ReturnType<typeof getDiffRow>>): string {
+  const changedColumns = new Set(row.changedColumns.map((column) => column.toLocaleLowerCase("en-US")));
+  const rows = diff.columns.map((column, index) => {
+    const changed = row.status !== "UPDATED" || changedColumns.has(column.toLocaleLowerCase("en-US"));
+    const before = row.before ? renderPreviewValue(row.before[index]) : "—";
+    const after = row.after ? renderPreviewValue(row.after[index]) : "—";
+    return `
+      <tr class="${changed ? "diff-changed-column" : ""}">
+        <th>${escapeHtml(column)}</th>
+        <td><div class="diff-cell-value">${escapeHtml(before)}</div></td>
+        <td><div class="diff-cell-value">${escapeHtml(after)}</div></td>
+      </tr>
+    `;
+  }).join("");
+  return `
+    <div id="diff-row-modal" class="modal active">
+      <div class="modal-dialog diff-row-dialog" role="dialog" aria-modal="true" aria-label="Diff Row Details">
+        <h3>Diff Row Details</h3>
+        <div class="insert-summary">
+          <span>Status: ${escapeHtml(row.status)}</span>
+          <span>Primary Key: ${escapeHtml(JSON.stringify(row.key))}</span>
+          <span>Changed Columns: ${escapeHtml(row.changedColumns.join(", ") || "-")}</span>
+        </div>
+        <p class="muted">値は省略せず表示します。色付きの行が変更対象です。</p>
+        <div class="preview-table diff-detail-table">
+          <table>
+            <thead><tr><th>Column</th><th>Before</th><th>After</th></tr></thead>
+            <tbody>${rows || `<tr><td colspan="3" class="muted">表示できる列がありません。</td></tr>`}</tbody>
+          </table>
+        </div>
+        <div class="modal-actions">
+          <button id="close-diff-row" type="button">Close</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function formatSnapshotDate(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("ja-JP");
+}
+
 function renderInfo(info: ObjectInfo): string {
   const primaryKeys = new Set(info.primaryKeys);
   const rows = info.columns.map((column) => `
@@ -415,13 +1100,15 @@ function renderInfo(info: ObjectInfo): string {
       <td>${escapeHtml(column.typeName)}${column.size ? `(${column.size})` : ""}</td>
       <td>${column.nullable ? "YES" : "NO"}</td>
       <td>${primaryKeys.has(column.name) ? "YES" : ""}</td>
+      <td>${column.autoIncrement ? "YES" : ""}</td>
+      <td>${column.generated ? "YES" : ""}</td>
       <td>${escapeHtml(column.defaultValue ?? "")}</td>
       <td>${escapeHtml(column.remarks ?? "")}</td>
     </tr>
   `).join("");
   return `
     <table>
-      <thead><tr><th>Name</th><th>Type</th><th>Nullable</th><th>PK</th><th>Default</th><th>Remarks</th></tr></thead>
+      <thead><tr><th>Name</th><th>Type</th><th>Nullable</th><th>PK</th><th>Auto Increment</th><th>Generated</th><th>Default</th><th>Remarks</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
   `;
@@ -471,7 +1158,16 @@ function renderIndexes(info: ObjectInfo): string {
   `;
 }
 
-function renderData(data: ObjectData, query: DataQuery): string {
+function renderData(
+  data: ObjectData,
+  query: DataQuery,
+  object: DbObject,
+  info: ObjectInfo,
+  tsvInsertPreview?: TsvInsertPreview,
+  deleteRowsPreview?: DeleteRowsPreview,
+  updateRowsPreview?: UpdateRowsPreview
+): string {
+  const writableColumns = info.columns.filter(isWritableColumn);
   const headers = data.columns.map((column) => {
     const active = query.sortColumn === column;
     const marker = active ? (query.sortDirection === "ASC" ? " ▲" : " ▼") : "";
@@ -508,15 +1204,228 @@ function renderData(data: ObjectData, query: DataQuery): string {
         <button id="export-tsv" type="button">Save TSV</button>
         <button id="export-insert" type="button">Save INSERT</button>
       </div>
+      ${object.type === "TABLE" ? `
+        <div class="toolbar-group">
+          <button id="open-tsv-insert" type="button" ${writableColumns.length === 0 ? "disabled" : ""}>Paste TSV Insert</button>
+          <button id="open-update-rows" type="button" ${info.primaryKeys.length === 0 ? "disabled" : ""}>Update Selected</button>
+          <button id="preview-delete-rows" type="button" ${info.primaryKeys.length === 0 ? "disabled" : ""}>Delete Selected</button>
+        </div>
+      ` : ""}
       <span class="toolbar-spacer"></span>
       <span class="muted">${data.rows.length} rows loaded</span>
     </div>
+    ${object.type === "TABLE" ? renderTsvInsertModal(object, info, tsvInsertPreview) : ""}
+    ${object.type === "TABLE" ? renderDeleteRowsModal(object, deleteRowsPreview) : ""}
+    ${object.type === "TABLE" ? renderUpdateRowsModal(object, data, info, updateRowsPreview) : ""}
     <table>
       <thead><tr><th class="selector"></th>${headers}</tr></thead>
       <tbody>${body}</tbody>
     </table>
     <div id="load-status" class="load-status muted">${data.hasNext ? "末尾までスクロールすると追加ロードします。" : "すべての表示可能な行を読み込みました。"}</div>
   `;
+}
+
+function renderDeleteRowsModal(object: DbObject, preview?: DeleteRowsPreview): string {
+  const activeClass = preview ? " active" : "";
+  const errors = preview?.errors ?? [];
+  const hasErrors = errors.length > 0;
+  const headers = preview?.primaryKeyColumns.map((column) => `<th>${escapeHtml(column)}</th>`).join("") ?? "";
+  const previewBody = preview && preview.previewRows.length > 0
+    ? preview.previewRows.map((row) => `
+      <tr>${row.map((value) => `<td>${escapeHtml(renderPreviewValue(value))}</td>`).join("")}</tr>
+    `).join("")
+    : `<tr><td class="muted">削除する行を選択してください。</td></tr>`;
+  const errorList = hasErrors
+    ? `<ul class="insert-errors">${errors.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}</ul>`
+    : "";
+  return `
+    <div id="delete-rows-modal" class="modal${activeClass}">
+      <div class="modal-dialog" role="dialog" aria-modal="true" aria-label="Delete Selected Rows Preview">
+        <h3>Delete Selected Rows</h3>
+        <div class="insert-summary">
+          <span>Target: ${escapeHtml(object.schema ? `${object.schema}.${object.name}` : object.name)}</span>
+          <span>Rows: ${preview?.rowCount ?? 0}</span>
+          <span>Primary Key: ${escapeHtml(preview?.primaryKeyColumns.join(", ") ?? "")}</span>
+        </div>
+        ${errorList}
+        <div class="preview-table">
+          <table>
+            <thead><tr>${headers}</tr></thead>
+            <tbody>${previewBody}</tbody>
+          </table>
+        </div>
+        <div class="modal-actions">
+          <button id="cancel-delete-rows" type="button">Cancel</button>
+          <button id="confirm-delete-rows" type="button" ${!preview || hasErrors ? "disabled" : ""}>Delete</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderUpdateRowsModal(object: DbObject, data: ObjectData, info: ObjectInfo, preview?: UpdateRowsPreview): string {
+  const activeClass = preview ? " active" : "";
+  const errors = preview?.errors ?? [];
+  const hasErrors = errors.length > 0;
+  const primaryKeySet = new Set(info.primaryKeys.map((column) => column.toLowerCase()));
+  const writableColumnSet = new Set(info.columns.filter(isWritableColumn).map((column) => column.name.toLowerCase()));
+  const inputColumns = data.columns.filter((column) =>
+    !primaryKeySet.has(column.toLowerCase()) && writableColumnSet.has(column.toLowerCase())
+  );
+  const validationColumnMap = new Map(validationColumns(info.columns).map((column) => [column.name.toLowerCase(), column]));
+  const selectedRowIndexes = new Set(preview?.rows.map((row) => row.rowIndex) ?? []);
+  const previewRowsByIndex = new Map(preview?.rows.map((row) => [row.rowIndex, row]) ?? []);
+  const editHeaders = [
+    ...info.primaryKeys.map((column) => `<th>${escapeHtml(column)}</th>`),
+    ...inputColumns.map((column) => `<th>${escapeHtml(column)}</th>`)
+  ].join("");
+  const editRows = data.rows.map((row, rowIndex) => {
+    const previewRow = previewRowsByIndex.get(rowIndex);
+    const active = selectedRowIndexes.has(rowIndex);
+    const primaryKeyCells = info.primaryKeys.map((column) => {
+      const columnIndex = findColumnIndex(data.columns, column);
+      return `<td>${escapeHtml(renderPreviewValue(row[columnIndex]))}</td>`;
+    }).join("");
+    const inputCells = inputColumns.map((column) => {
+      const columnIndex = findColumnIndex(data.columns, column);
+      const previewColumnIndex = preview?.updateColumns.indexOf(column) ?? -1;
+      const value = previewRow && previewColumnIndex >= 0 ? previewRow.values[previewColumnIndex] : row[columnIndex];
+      const validationColumn = validationColumnMap.get(column.toLowerCase());
+      return `<td>${renderUpdateInput(validationColumn, value)}</td>`;
+    }).join("");
+    return `<tr class="update-edit-row${active ? " active" : ""}" data-row-index="${rowIndex}">${primaryKeyCells}${inputCells}</tr>`;
+  }).join("");
+  const previewHeaders = preview
+    ? [
+      ...preview.primaryKeyColumns.map((column) => `<th>${escapeHtml(column)}</th>`),
+      ...preview.updateColumns.map((column) => `<th>${escapeHtml(column)}</th>`)
+    ].join("")
+    : "";
+  const previewBody = preview && preview.previewRows.length > 0 && preview.updateColumns.length > 0
+    ? preview.previewRows.map((row) => {
+      const primaryKeys = row.primaryKeyValues.map((value) => `<td>${escapeHtml(renderPreviewValue(value))}</td>`).join("");
+      const values = preview.updateColumns.map((_, index) => {
+        const previous = renderPreviewValue(row.previousValues[index]);
+        const next = renderPreviewValue(row.values[index]);
+        return `<td><span class="muted">${escapeHtml(previous)}</span> -> ${escapeHtml(next)}</td>`;
+      }).join("");
+      return `<tr>${primaryKeys}${values}</tr>`;
+    }).join("")
+    : `<tr><td class="muted">更新する行を選択し、値を変更してPreviewしてください。</td></tr>`;
+  const errorList = hasErrors
+    ? `<ul class="insert-errors">${errors.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}</ul>`
+    : "";
+  return `
+    <div id="update-rows-modal" class="modal${activeClass}">
+      <div class="modal-dialog" role="dialog" aria-modal="true" aria-label="Update Selected Rows Preview">
+        <h3>Update Selected Rows</h3>
+        <div class="insert-summary">
+          <span>Target: ${escapeHtml(object.schema ? `${object.schema}.${object.name}` : object.name)}</span>
+          <span>Rows: ${preview?.rowCount ?? 0}</span>
+          <span>Primary Key: ${escapeHtml(info.primaryKeys.join(", "))}</span>
+          <span>Changed Columns: ${escapeHtml(preview?.updateColumns.join(", ") ?? "")}</span>
+        </div>
+        <p class="muted">主キー列と自動生成列は更新対象外です。DATE / TIME / TIMESTAMP列は日付・時刻入力を使用します。日付・時刻入力は空欄、文字列入力は \\N をNULLとして扱います。</p>
+        ${errorList}
+        <div class="preview-table">
+          <table>
+            <thead><tr>${editHeaders}</tr></thead>
+            <tbody>${editRows || `<tr><td class="muted">表示中の行がありません。</td></tr>`}</tbody>
+          </table>
+        </div>
+        <h4>Preview</h4>
+        <div class="preview-table">
+          <table>
+            <thead><tr>${previewHeaders}</tr></thead>
+            <tbody>${previewBody}</tbody>
+          </table>
+        </div>
+        <div class="modal-actions">
+          <button id="cancel-update-rows" type="button">Cancel</button>
+          <button id="preview-update-rows" type="button">Preview</button>
+          <button id="confirm-update-rows" type="button" ${!preview || hasErrors ? "disabled" : ""}>Update</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderTsvInsertModal(object: DbObject, info: ObjectInfo, preview?: TsvInsertPreview): string {
+  const activeClass = preview ? " active" : "";
+  const errors = preview?.errors ?? [];
+  const hasErrors = errors.length > 0;
+  const previewRows = preview?.previewRows ?? [];
+  const columns = preview?.columns ?? info.columns.filter(isWritableColumn).map((column) => column.name);
+  const previewHeaders = columns.map((column) => `<th>${escapeHtml(column)}</th>`).join("");
+  const previewBody = previewRows.length > 0
+    ? previewRows.map((row) => `
+      <tr>${columns.map((_, index) => `<td>${escapeHtml(renderPreviewValue(row[index]))}</td>`).join("")}</tr>
+    `).join("")
+    : `<tr><td colspan="${Math.max(columns.length, 1)}" class="muted">PreviewするTSVを入力してください。</td></tr>`;
+  const errorList = hasErrors
+    ? `<ul class="insert-errors">${errors.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}</ul>`
+    : "";
+  return `
+    <div id="tsv-insert-modal" class="modal${activeClass}">
+      <div class="modal-dialog" role="dialog" aria-modal="true" aria-label="TSV Insert Preview">
+        <h3>Paste TSV Insert</h3>
+        <div class="insert-summary">
+          <span>Target: ${escapeHtml(object.schema ? `${object.schema}.${object.name}` : object.name)}</span>
+          <span>Rows: ${preview?.rowCount ?? 0}</span>
+          <span>Columns: ${columns.length}</span>
+          <span>NULL: ${preview?.nullCount ?? 0}</span>
+        </div>
+        <textarea id="tsv-insert-input" spellcheck="false" placeholder="書き込み可能な列順のTSVを貼り付けます。ダブルクォートで囲むとタブや改行を含められ、二重のダブルクォートは1文字として扱います。空欄は空文字、\\NはNULLです。">${escapeHtml(preview?.sourceText ?? "")}</textarea>
+        ${errorList}
+        <div class="preview-table">
+          <table>
+            <thead><tr>${previewHeaders}</tr></thead>
+            <tbody>${previewBody}</tbody>
+          </table>
+        </div>
+        <div class="modal-actions">
+          <button id="cancel-tsv-insert" type="button">Cancel</button>
+          <button id="preview-tsv-insert" type="button">Preview</button>
+          <button id="confirm-tsv-insert" type="button" ${!preview || hasErrors ? "disabled" : ""}>Insert</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderUpdateInput(column: ValidationColumn | undefined, value: string | number | boolean | null | undefined): string {
+  if (!column) {
+    return `<input class="update-input" type="text" value="${escapeHtml(toTextInputValue(value))}" title="NULLにする場合は \\N を入力します">`;
+  }
+  const inputType = updateInputType(column);
+  if (inputType === "text") {
+    return `<input class="update-input" type="text" value="${escapeHtml(toTextInputValue(value))}" title="NULLにする場合は \\N を入力します">`;
+  }
+  const step = inputType === "time" || inputType === "datetime-local" ? " step=\"1\"" : "";
+  return `<input class="update-input temporal-input" type="${inputType}" data-temporal-kind="${inputType}" value="${escapeHtml(normalizeTemporalInputValue(column, value))}"${step} title="空欄にするとNULLとして扱います">`;
+}
+
+function toTextInputValue(value: string | number | boolean | null | undefined): string {
+  if (value === null || value === undefined) {
+    return "\\N";
+  }
+  return String(value);
+}
+
+function findColumnIndex(columns: string[], target: string): number {
+  const exact = columns.indexOf(target);
+  if (exact >= 0) {
+    return exact;
+  }
+  const normalizedTarget = target.toLowerCase();
+  return columns.findIndex((column) => column.toLowerCase() === normalizedTarget);
+}
+
+function renderPreviewValue(value: string | number | boolean | null | undefined): string {
+  if (value === null) {
+    return "NULL";
+  }
+  return value === undefined ? "" : String(value);
 }
 
 function shell(profile: ConnectionProfile, object: DbObject, body: string, nonce = ""): string {
@@ -547,6 +1456,7 @@ function shell(profile: ConnectionProfile, object: DbObject, body: string, nonce
     .data-toolbar { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
     .toolbar-group { align-items: center; border: 1px solid var(--vscode-panel-border); display: flex; gap: 6px; padding: 4px; }
     .toolbar-spacer { flex: 1; }
+    select { background: var(--vscode-dropdown-background); border: 1px solid var(--vscode-dropdown-border); color: var(--vscode-dropdown-foreground); max-width: 440px; padding: 6px 8px; }
     .selection-count { color: var(--vscode-descriptionForeground); min-width: 56px; padding: 0 4px; }
     #where-input { background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border); color: var(--vscode-input-foreground); min-width: 280px; padding: 6px 8px; }
     .load-status { padding: 12px 0 18px; text-align: center; }
@@ -557,6 +1467,39 @@ function shell(profile: ConnectionProfile, object: DbObject, body: string, nonce
     .selector { text-align: center; width: 36px; }
     .sort-column { background: transparent; color: inherit; display: block; font: inherit; padding: 0; text-align: left; width: 100%; }
     .sort-column.active-sort { color: var(--vscode-textLink-foreground); font-weight: 600; }
+    .modal { align-items: center; background: rgba(0, 0, 0, 0.35); display: none; inset: 0; justify-content: center; position: fixed; z-index: 10; }
+    .modal.active { display: flex; }
+    .modal-dialog { background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35); max-height: 88vh; overflow: auto; padding: 16px; width: min(980px, calc(100vw - 36px)); }
+    .modal-dialog h3 { font-size: 15px; margin: 0 0 10px; }
+    .modal-dialog h4 { font-size: 13px; margin: 14px 0 8px; }
+    .insert-summary { color: var(--vscode-descriptionForeground); display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 10px; }
+    #tsv-insert-input { background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border); color: var(--vscode-input-foreground); box-sizing: border-box; font-family: var(--vscode-editor-font-family); min-height: 140px; padding: 8px; width: 100%; }
+    .update-edit-row { display: none; }
+    .update-edit-row.active { display: table-row; }
+    .update-input { background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border); color: var(--vscode-input-foreground); box-sizing: border-box; min-width: 140px; padding: 5px 6px; width: 100%; }
+    .insert-errors { color: var(--vscode-errorForeground); margin: 10px 0; padding-left: 20px; }
+    .preview-table { margin-top: 10px; max-height: 320px; overflow: auto; }
+    .diff-summary { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); margin: 14px 0; }
+    .diff-summary > div { background: var(--vscode-editorWidget-background); border: 1px solid var(--vscode-panel-border); padding: 10px; }
+    .diff-summary strong, .diff-summary span { display: block; }
+    .diff-summary span { color: var(--vscode-descriptionForeground); font-size: 12px; margin-top: 4px; }
+    .diff-filter, .diff-pagination { align-items: flex-end; display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+    .diff-filter label { color: var(--vscode-descriptionForeground); display: flex; flex-direction: column; gap: 4px; }
+    .diff-filter input, #diff-page-input { background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border); color: var(--vscode-input-foreground); padding: 6px 8px; }
+    .diff-filter input { min-width: 180px; }
+    #diff-page-input { width: 72px; }
+    .diff-preview th, .diff-preview td { white-space: normal; }
+    .diff-preview .diff-json, .diff-preview td:nth-child(2) { font-family: var(--vscode-editor-font-family); min-width: 160px; overflow-wrap: anywhere; white-space: pre-wrap; }
+    .diff-row-dialog { width: min(1180px, calc(100vw - 36px)); }
+    .diff-detail-table { max-height: 65vh; }
+    .diff-detail-table tbody th { position: static; }
+    .diff-cell-value { font-family: var(--vscode-editor-font-family); min-width: 220px; overflow-wrap: anywhere; white-space: pre-wrap; }
+    .diff-changed-column th, .diff-changed-column td { background: var(--vscode-diffEditor-insertedTextBackground); }
+    .diff-status { font-weight: 600; }
+    .diff-status.added { color: var(--vscode-testing-iconPassed); }
+    .diff-status.removed { color: var(--vscode-testing-iconFailed); }
+    .diff-status.updated { color: var(--vscode-editorWarning-foreground); }
+    .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
     pre { overflow: auto; background: var(--vscode-textCodeBlock-background); padding: 12px; }
   </style>
 </head>

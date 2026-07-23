@@ -1,18 +1,34 @@
 package com.example.dbviewer;
 
 import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
+import java.io.Reader;
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.sql.Array;
+import java.sql.Blob;
+import java.sql.Clob;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.sql.SQLXML;
+import java.sql.Time;
+import java.sql.Timestamp;
+import java.sql.Types;
+import java.sql.Date;
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -66,6 +82,9 @@ public final class JdbcHelper {
           nullableString(request.get("sortDirection"))
         );
         case "getObjectDdl" -> getObjectDdl(connection, object(request));
+        case "insertRows" -> insertRows(connection, object(request), stringList(request.get("columns")), rowList(request.get("rows")));
+        case "deleteRows" -> deleteRows(connection, object(request), stringList(request.get("primaryKeyColumns")), rowList(request.get("rows")));
+        case "updateRows" -> updateRows(connection, object(request), stringList(request.get("updateColumns")), stringList(request.get("primaryKeyColumns")), rowList(request.get("rows")));
         default -> throw new IllegalArgumentException("Unknown action: " + action);
       };
     }
@@ -113,17 +132,25 @@ public final class JdbcHelper {
 
   private static Map<String, Object> getObjectInfo(Connection connection, DbObject object) throws SQLException {
     DatabaseMetaData metadata = connection.getMetaData();
+    JdbcDialect dialect = JdbcDialect.from(connection);
     List<Map<String, Object>> columns = new ArrayList<>();
     try (ResultSet rs = metadata.getColumns(null, object.schema(), object.name(), "%")) {
       while (rs.next()) {
+        String typeName = rs.getString("TYPE_NAME");
+        boolean autoIncrement = metadataFlag(rs, "IS_AUTOINCREMENT");
+        boolean generated = autoIncrement
+          || metadataFlag(rs, "IS_GENERATEDCOLUMN")
+          || dialect.isGeneratedType(typeName);
         Map<String, Object> column = new LinkedHashMap<>();
         column.put("name", rs.getString("COLUMN_NAME"));
-        column.put("typeName", rs.getString("TYPE_NAME"));
+        column.put("typeName", typeName);
         int jdbcType = rs.getInt("DATA_TYPE");
         column.put("jdbcType", rs.wasNull() ? null : jdbcType);
         int size = rs.getInt("COLUMN_SIZE");
         column.put("size", rs.wasNull() ? null : size);
         column.put("nullable", rs.getInt("NULLABLE") == DatabaseMetaData.columnNullable);
+        column.put("autoIncrement", autoIncrement);
+        column.put("generated", generated);
         column.put("ordinal", rs.getInt("ORDINAL_POSITION"));
         column.put("defaultValue", rs.getString("COLUMN_DEF"));
         column.put("remarks", rs.getString("REMARKS"));
@@ -288,19 +315,22 @@ public final class JdbcHelper {
   ) throws SQLException {
     int safeLimit = Math.max(1, Math.min(limit, 1000));
     int safeOffset = Math.max(0, offset);
-    String baseSql = dataSql(connection, object, where, sortColumn, sortDirection);
-    String sql = baseSql + " offset " + safeOffset + " rows fetch next " + (safeLimit + 1) + " rows only";
-    try (Statement statement = connection.createStatement()) {
-      try {
+    List<OrderColumn> orderColumns = stableOrderColumns(connection, object, sortColumn, sortDirection);
+    String baseSql = dataSql(connection, object, where, orderColumns);
+    String sql = JdbcDialect.from(connection).paginatedSql(baseSql, safeOffset, safeLimit + 1, !orderColumns.isEmpty());
+    try {
+      try (Statement statement = connection.createStatement()) {
         return readRows(statement, sql, safeLimit, safeOffset, 0);
-      } catch (SQLException firstError) {
+      }
+    } catch (SQLException firstError) {
+      try (Statement statement = connection.createStatement()) {
         statement.setMaxRows(safeLimit + safeOffset + 1);
         return readRows(statement, baseSql, safeLimit, safeOffset, safeOffset);
       }
     }
   }
 
-  private static String dataSql(Connection connection, DbObject object, String where, String sortColumn, String sortDirection) throws SQLException {
+  private static String dataSql(Connection connection, DbObject object, String where, List<OrderColumn> orderColumns) throws SQLException {
     StringBuilder sql = new StringBuilder("select * from ").append(qualifiedName(connection, object));
     if (where != null && !where.isBlank()) {
       String condition = where.trim();
@@ -309,11 +339,66 @@ public final class JdbcHelper {
       }
       sql.append(" where ").append(condition);
     }
-    if (sortColumn != null && !sortColumn.isBlank()) {
-      sql.append(" order by ").append(quote(connection, sortColumn.trim()));
-      sql.append("DESC".equalsIgnoreCase(sortDirection) ? " DESC" : " ASC");
+    if (!orderColumns.isEmpty()) {
+      sql.append(" order by ");
+      for (int i = 0; i < orderColumns.size(); i += 1) {
+        if (i > 0) {
+          sql.append(", ");
+        }
+        OrderColumn orderColumn = orderColumns.get(i);
+        sql.append(quote(connection, orderColumn.name()));
+        sql.append(orderColumn.descending() ? " DESC" : " ASC");
+      }
     }
     return sql.toString();
+  }
+
+  private static List<OrderColumn> stableOrderColumns(
+    Connection connection,
+    DbObject object,
+    String sortColumn,
+    String sortDirection
+  ) throws SQLException {
+    Map<String, OrderColumn> columns = new LinkedHashMap<>();
+    if (sortColumn != null && !sortColumn.isBlank()) {
+      String name = sortColumn.trim();
+      columns.put(name.toLowerCase(), new OrderColumn(name, "DESC".equalsIgnoreCase(sortDirection)));
+    }
+
+    DatabaseMetaData metadata = connection.getMetaData();
+    List<String> stableColumns = new ArrayList<>();
+    for (Map<String, Object> row : safePrimaryKeys(metadata, object)) {
+      stableColumns.add(string(row.get("columnName")));
+    }
+    if (stableColumns.isEmpty()) {
+      stableColumns.addAll(firstUniqueIndexColumns(safeIndexes(metadata, object)));
+    }
+    for (String column : stableColumns) {
+      columns.putIfAbsent(column.toLowerCase(), new OrderColumn(column, false));
+    }
+    return new ArrayList<>(columns.values());
+  }
+
+  private static List<String> firstUniqueIndexColumns(List<Map<String, Object>> indexes) {
+    String selectedIndex = null;
+    List<String> columns = new ArrayList<>();
+    for (Map<String, Object> index : indexes) {
+      if (!Boolean.TRUE.equals(index.get("unique")) || index.get("columnName") == null) {
+        continue;
+      }
+      String indexName = string(index.get("name"));
+      if (indexName.isBlank()) {
+        continue;
+      }
+      if (selectedIndex == null) {
+        selectedIndex = indexName;
+      }
+      if (!selectedIndex.equals(indexName)) {
+        break;
+      }
+      columns.add(string(index.get("columnName")));
+    }
+    return columns;
   }
 
   private static Map<String, Object> readRows(Statement statement, String sql, int limit, int offset, int rowsToSkip) throws SQLException {
@@ -338,7 +423,7 @@ public final class JdbcHelper {
       while (rs.next()) {
         List<Object> row = new ArrayList<>();
         for (int i = 1; i <= metadata.getColumnCount(); i += 1) {
-          row.add(rs.getObject(i));
+          row.add(normalizeJdbcValue(rs.getObject(i)));
         }
         rows.add(row);
         if (rows.size() > limit) {
@@ -409,6 +494,377 @@ public final class JdbcHelper {
     return result;
   }
 
+  private static Map<String, Object> insertRows(
+    Connection connection,
+    DbObject object,
+    List<String> columns,
+    List<List<Object>> rows
+  ) throws SQLException {
+    if (isView(object)) {
+      throw new SQLException("TSV Insert is available for tables only.");
+    }
+    if (columns.isEmpty()) {
+      throw new SQLException("Insert columns are required.");
+    }
+    if (rows.isEmpty()) {
+      throw new SQLException("Insert rows are required.");
+    }
+    for (int i = 0; i < rows.size(); i += 1) {
+      if (rows.get(i).size() != columns.size()) {
+        throw new SQLException("Row " + (i + 1) + " has " + rows.get(i).size() + " value(s), expected " + columns.size() + ".");
+      }
+    }
+
+    boolean originalAutoCommit = connection.getAutoCommit();
+    connection.setAutoCommit(false);
+    int insertedRows = 0;
+    Map<String, ColumnBinding> columnBindings = columnBindings(connection, object, columns);
+    requireWritableColumns(columns, columnBindings, "Insert");
+    try (PreparedStatement statement = connection.prepareStatement(insertSql(connection, object, columns))) {
+      for (List<Object> row : rows) {
+        for (int i = 0; i < row.size(); i += 1) {
+          ColumnBinding binding = columnBindings.get(columns.get(i));
+          bindInsertValue(statement, i + 1, row.get(i), binding);
+        }
+        statement.addBatch();
+      }
+      insertedRows = affectedRowCount(statement.executeBatch());
+      connection.commit();
+      return Map.of("insertedRows", insertedRows);
+    } catch (SQLException error) {
+      connection.rollback();
+      throw error;
+    } finally {
+      connection.setAutoCommit(originalAutoCommit);
+    }
+  }
+
+  private static String insertSql(Connection connection, DbObject object, List<String> columns) throws SQLException {
+    StringBuilder sql = new StringBuilder("insert into ");
+    sql.append(qualifiedName(connection, object)).append(" (");
+    for (int i = 0; i < columns.size(); i += 1) {
+      if (i > 0) {
+        sql.append(", ");
+      }
+      sql.append(quote(connection, columns.get(i)));
+    }
+    sql.append(") values (");
+    for (int i = 0; i < columns.size(); i += 1) {
+      if (i > 0) {
+        sql.append(", ");
+      }
+      sql.append("?");
+    }
+    sql.append(")");
+    return sql.toString();
+  }
+
+  private static Map<String, Object> deleteRows(
+    Connection connection,
+    DbObject object,
+    List<String> primaryKeyColumns,
+    List<List<Object>> rows
+  ) throws SQLException {
+    if (isView(object)) {
+      throw new SQLException("Selected row delete is available for tables only.");
+    }
+    if (primaryKeyColumns.isEmpty()) {
+      throw new SQLException("Primary key columns are required.");
+    }
+    if (rows.isEmpty()) {
+      throw new SQLException("Delete rows are required.");
+    }
+    for (int i = 0; i < rows.size(); i += 1) {
+      if (rows.get(i).size() != primaryKeyColumns.size()) {
+        throw new SQLException("Row " + (i + 1) + " has " + rows.get(i).size() + " primary key value(s), expected " + primaryKeyColumns.size() + ".");
+      }
+    }
+
+    boolean originalAutoCommit = connection.getAutoCommit();
+    connection.setAutoCommit(false);
+    int deletedRows = 0;
+    Map<String, ColumnBinding> columnBindings = columnBindings(connection, object, primaryKeyColumns);
+    try (PreparedStatement statement = connection.prepareStatement(deleteSql(connection, object, primaryKeyColumns))) {
+      for (List<Object> row : rows) {
+        for (int i = 0; i < row.size(); i += 1) {
+          ColumnBinding binding = columnBindings.get(primaryKeyColumns.get(i));
+          bindInsertValue(statement, i + 1, row.get(i), binding);
+        }
+        statement.addBatch();
+      }
+      deletedRows = affectedRowCount(statement.executeBatch());
+      requireExpectedRowCount("Delete", rows.size(), deletedRows);
+      connection.commit();
+      return Map.of("deletedRows", deletedRows);
+    } catch (SQLException error) {
+      connection.rollback();
+      throw error;
+    } finally {
+      connection.setAutoCommit(originalAutoCommit);
+    }
+  }
+
+  private static String deleteSql(Connection connection, DbObject object, List<String> primaryKeyColumns) throws SQLException {
+    StringBuilder sql = new StringBuilder("delete from ");
+    sql.append(qualifiedName(connection, object)).append(" where ");
+    for (int i = 0; i < primaryKeyColumns.size(); i += 1) {
+      if (i > 0) {
+        sql.append(" and ");
+      }
+      sql.append(quote(connection, primaryKeyColumns.get(i))).append(" = ?");
+    }
+    return sql.toString();
+  }
+
+  private static Map<String, Object> updateRows(
+    Connection connection,
+    DbObject object,
+    List<String> updateColumns,
+    List<String> primaryKeyColumns,
+    List<List<Object>> rows
+  ) throws SQLException {
+    if (isView(object)) {
+      throw new SQLException("Selected row update is available for tables only.");
+    }
+    if (updateColumns.isEmpty()) {
+      throw new SQLException("Update columns are required.");
+    }
+    if (primaryKeyColumns.isEmpty()) {
+      throw new SQLException("Primary key columns are required.");
+    }
+    if (rows.isEmpty()) {
+      throw new SQLException("Update rows are required.");
+    }
+    int expectedValues = updateColumns.size() + primaryKeyColumns.size();
+    for (int i = 0; i < rows.size(); i += 1) {
+      if (rows.get(i).size() != expectedValues) {
+        throw new SQLException("Row " + (i + 1) + " has " + rows.get(i).size() + " value(s), expected " + expectedValues + ".");
+      }
+    }
+
+    boolean originalAutoCommit = connection.getAutoCommit();
+    connection.setAutoCommit(false);
+    int updatedRows = 0;
+    List<String> parameterColumns = new ArrayList<>();
+    parameterColumns.addAll(updateColumns);
+    parameterColumns.addAll(primaryKeyColumns);
+    Map<String, ColumnBinding> columnBindings = columnBindings(connection, object, parameterColumns);
+    requireWritableColumns(updateColumns, columnBindings, "Update");
+    try (PreparedStatement statement = connection.prepareStatement(updateSql(connection, object, updateColumns, primaryKeyColumns))) {
+      for (List<Object> row : rows) {
+        for (int i = 0; i < row.size(); i += 1) {
+          ColumnBinding binding = columnBindings.get(parameterColumns.get(i));
+          bindInsertValue(statement, i + 1, row.get(i), binding);
+        }
+        statement.addBatch();
+      }
+      updatedRows = affectedRowCount(statement.executeBatch());
+      requireExpectedRowCount("Update", rows.size(), updatedRows);
+      connection.commit();
+      return Map.of("updatedRows", updatedRows);
+    } catch (SQLException error) {
+      connection.rollback();
+      throw error;
+    } finally {
+      connection.setAutoCommit(originalAutoCommit);
+    }
+  }
+
+  private static String updateSql(Connection connection, DbObject object, List<String> updateColumns, List<String> primaryKeyColumns) throws SQLException {
+    StringBuilder sql = new StringBuilder("update ");
+    sql.append(qualifiedName(connection, object)).append(" set ");
+    for (int i = 0; i < updateColumns.size(); i += 1) {
+      if (i > 0) {
+        sql.append(", ");
+      }
+      sql.append(quote(connection, updateColumns.get(i))).append(" = ?");
+    }
+    sql.append(" where ");
+    for (int i = 0; i < primaryKeyColumns.size(); i += 1) {
+      if (i > 0) {
+        sql.append(" and ");
+      }
+      sql.append(quote(connection, primaryKeyColumns.get(i))).append(" = ?");
+    }
+    return sql.toString();
+  }
+
+  private static int affectedRowCount(int[] counts) throws SQLException {
+    int affectedRows = 0;
+    for (int count : counts) {
+      if (count > 0) {
+        affectedRows += count;
+      } else if (count == Statement.SUCCESS_NO_INFO) {
+        affectedRows += 1;
+      } else if (count == Statement.EXECUTE_FAILED) {
+        throw new SQLException("Batch execution failed.");
+      }
+    }
+    return affectedRows;
+  }
+
+  private static void requireExpectedRowCount(String operation, int expectedRows, int actualRows) throws SQLException {
+    if (actualRows != expectedRows) {
+      throw new SQLException(operation + " affected " + actualRows + " row(s), expected " + expectedRows + ". The transaction was rolled back.");
+    }
+  }
+
+  private static Map<String, ColumnBinding> columnBindings(Connection connection, DbObject object, List<String> columns) throws SQLException {
+    DatabaseMetaData metadata = connection.getMetaData();
+    JdbcDialect dialect = JdbcDialect.from(connection);
+    Map<String, ColumnBinding> available = new HashMap<>();
+    try (ResultSet rs = metadata.getColumns(null, object.schema(), object.name(), "%")) {
+      while (rs.next()) {
+        String name = rs.getString("COLUMN_NAME");
+        int jdbcType = rs.getInt("DATA_TYPE");
+        if (!rs.wasNull()) {
+          String typeName = rs.getString("TYPE_NAME");
+          boolean autoIncrement = metadataFlag(rs, "IS_AUTOINCREMENT");
+          boolean generated = autoIncrement
+            || metadataFlag(rs, "IS_GENERATEDCOLUMN")
+            || dialect.isGeneratedType(typeName);
+          ColumnBinding binding = new ColumnBinding(jdbcType, typeName, generated);
+          available.put(name, binding);
+          available.put(name.toUpperCase(), binding);
+          available.put(name.toLowerCase(), binding);
+        }
+      }
+    }
+
+    Map<String, ColumnBinding> result = new LinkedHashMap<>();
+    for (String column : columns) {
+      ColumnBinding binding = available.get(column);
+      if (binding == null) {
+        throw new SQLException("Column metadata is not available: " + column);
+      }
+      result.put(column, binding);
+    }
+    return result;
+  }
+
+  private static void requireWritableColumns(
+    List<String> columns,
+    Map<String, ColumnBinding> bindings,
+    String operation
+  ) throws SQLException {
+    for (String column : columns) {
+      ColumnBinding binding = bindings.get(column);
+      if (binding != null && binding.generated()) {
+        throw new SQLException(operation + " cannot write generated column: " + column);
+      }
+    }
+  }
+
+  private static void bindInsertValue(PreparedStatement statement, int parameterIndex, Object value, ColumnBinding binding) throws SQLException {
+    if (value == null) {
+      statement.setNull(parameterIndex, binding.jdbcType());
+      return;
+    }
+    String text = String.valueOf(value);
+    try {
+      statement.setObject(parameterIndex, typedInsertValue(text, binding), binding.jdbcType());
+    } catch (RuntimeException error) {
+      throw new SQLException("Value '" + text + "' cannot be converted for parameter " + parameterIndex + " (JDBC type " + binding.jdbcType() + ", type " + binding.typeName() + ").", error);
+    }
+  }
+
+  private static Object typedInsertValue(String value, ColumnBinding binding) {
+    String typeName = binding.typeName() == null ? "" : binding.typeName().trim().toLowerCase();
+    if (typeName.equals("date")) {
+      return Date.valueOf(value);
+    }
+    if (typeName.equals("datetime") || typeName.equals("datetime2") || typeName.equals("smalldatetime")) {
+      return Timestamp.valueOf(value.replace("T", " "));
+    }
+    if (typeName.equals("money") || typeName.equals("smallmoney")) {
+      return new BigDecimal(value);
+    }
+    if (isBinaryType(binding) && value.startsWith("base64:")) {
+      return Base64.getDecoder().decode(value.substring("base64:".length()));
+    }
+    return switch (binding.jdbcType()) {
+      case Types.TINYINT, Types.SMALLINT, Types.INTEGER -> Integer.valueOf(value);
+      case Types.BIGINT -> Long.valueOf(value);
+      case Types.REAL, Types.FLOAT -> Float.valueOf(value);
+      case Types.DOUBLE -> Double.valueOf(value);
+      case Types.NUMERIC, Types.DECIMAL -> new BigDecimal(value);
+      case Types.BOOLEAN, Types.BIT -> parseBoolean(value);
+      case Types.DATE -> Date.valueOf(value);
+      case Types.TIME, Types.TIME_WITH_TIMEZONE -> Time.valueOf(value);
+      case Types.TIMESTAMP -> Timestamp.valueOf(value.replace("T", " "));
+      case Types.TIMESTAMP_WITH_TIMEZONE -> OffsetDateTime.parse(value);
+      default -> value;
+    };
+  }
+
+  private static boolean isBinaryType(ColumnBinding binding) {
+    return switch (binding.jdbcType()) {
+      case Types.BINARY, Types.VARBINARY, Types.LONGVARBINARY, Types.BLOB -> true;
+      default -> {
+        String typeName = binding.typeName() == null ? "" : binding.typeName().trim().toLowerCase();
+        yield typeName.equals("binary")
+          || typeName.equals("varbinary")
+          || typeName.equals("image")
+          || typeName.equals("timestamp")
+          || typeName.equals("rowversion");
+      }
+    };
+  }
+
+  private static Boolean parseBoolean(String value) {
+    String normalized = value.trim().toLowerCase();
+    return switch (normalized) {
+      case "true", "t", "1", "yes", "y" -> Boolean.TRUE;
+      case "false", "f", "0", "no", "n" -> Boolean.FALSE;
+      default -> throw new IllegalArgumentException("Invalid boolean value: " + value);
+    };
+  }
+
+  private static Object normalizeJdbcValue(Object value) throws SQLException {
+    if (value == null) {
+      return null;
+    }
+    if (value instanceof byte[] bytes) {
+      return "base64:" + Base64.getEncoder().encodeToString(bytes);
+    }
+    if (value instanceof Blob blob) {
+      try (InputStream input = blob.getBinaryStream()) {
+        return "base64:" + Base64.getEncoder().encodeToString(input.readAllBytes());
+      } catch (IOException error) {
+        throw new SQLException("Failed to read BLOB value.", error);
+      }
+    }
+    if (value instanceof Clob clob) {
+      try (Reader reader = clob.getCharacterStream()) {
+        StringBuilder text = new StringBuilder();
+        char[] buffer = new char[8192];
+        int count;
+        while ((count = reader.read(buffer)) >= 0) {
+          text.append(buffer, 0, count);
+        }
+        return text.toString();
+      } catch (IOException error) {
+        throw new SQLException("Failed to read CLOB value.", error);
+      }
+    }
+    if (value instanceof SQLXML xml) {
+      return xml.getString();
+    }
+    if (value instanceof Array array) {
+      return normalizeArray(array.getArray());
+    }
+    return value;
+  }
+
+  private static List<Object> normalizeArray(Object value) throws SQLException {
+    int length = java.lang.reflect.Array.getLength(value);
+    List<Object> items = new ArrayList<>(length);
+    for (int i = 0; i < length; i += 1) {
+      items.add(normalizeJdbcValue(java.lang.reflect.Array.get(value, i)));
+    }
+    return items;
+  }
+
   private static ObjectInfoParts objectInfoParts(Connection connection, DbObject object) throws SQLException {
     Map<String, Object> info = getObjectInfo(connection, object);
     @SuppressWarnings("unchecked")
@@ -426,11 +882,8 @@ public final class JdbcHelper {
   }
 
   private static String quote(Connection connection, String identifier) throws SQLException {
-    String quote = normalizedIdentifierQuote(connection);
-    if (quote.isBlank()) {
-      return identifier;
-    }
-    return quote + identifier.replace(quote, quote + quote) + quote;
+    DatabaseMetaData metadata = connection.getMetaData();
+    return JdbcDialect.from(connection).quoteIdentifier(identifier, metadata.getIdentifierQuoteString());
   }
 
   private static String normalizedIdentifierQuote(Connection connection) throws SQLException {
@@ -486,6 +939,14 @@ public final class JdbcHelper {
       schema = schema.substring(0, at);
     }
     return schema.isBlank() ? null : schema;
+  }
+
+  private static boolean metadataFlag(ResultSet rs, String columnName) {
+    try {
+      return "YES".equalsIgnoreCase(rs.getString(columnName));
+    } catch (SQLException ignored) {
+      return false;
+    }
   }
 
   private static DbObject object(Map<String, Object> request) {
@@ -548,6 +1009,31 @@ public final class JdbcHelper {
     return value instanceof Number number ? number.intValue() : defaultValue;
   }
 
+  private static List<String> stringList(Object value) {
+    if (!(value instanceof List<?> list)) {
+      return List.of();
+    }
+    List<String> result = new ArrayList<>();
+    for (Object item : list) {
+      result.add(string(item));
+    }
+    return result;
+  }
+
+  private static List<List<Object>> rowList(Object value) {
+    if (!(value instanceof List<?> list)) {
+      return List.of();
+    }
+    List<List<Object>> result = new ArrayList<>();
+    for (Object rawRow : list) {
+      if (!(rawRow instanceof List<?> row)) {
+        throw new IllegalArgumentException("Each row must be an array.");
+      }
+      result.add(new ArrayList<>(row));
+    }
+    return result;
+  }
+
   private static int numberOrZero(Object value) {
     return value instanceof Number number ? number.intValue() : 0;
   }
@@ -560,6 +1046,10 @@ public final class JdbcHelper {
   private record DbObject(String schema, String name, String type) {}
 
   private record ObjectInfoParts(List<Map<String, Object>> columns, List<String> primaryKeys) {}
+
+  private record ColumnBinding(int jdbcType, String typeName, boolean generated) {}
+
+  private record OrderColumn(String name, boolean descending) {}
 
   private static final class Json {
     private final String source;

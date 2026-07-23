@@ -143,3 +143,20 @@ test("duplicates profiles with a new name and password secret", async () => {
   assert.deepEqual(duplicated.supportJarPaths, ["/drivers/support.jar"]);
   assert.equal(await store.getPassword(duplicated), "secret");
 });
+
+test("stores Microsoft SQL Server profiles", async () => {
+  const store = new ProfileStore(new MemoryMemento(), new MemorySecrets());
+  const profile = await store.upsert({
+    name: "sqlserver-local",
+    dbType: "sqlserver",
+    jdbcUrl: "jdbc:sqlserver://localhost:1433;databaseName=app;encrypt=true",
+    driverClass: "com.microsoft.sqlserver.jdbc.SQLServerDriver",
+    driverJarPaths: ["/drivers/mssql-jdbc.jar"],
+    supportJarPaths: [],
+    username: "sa",
+    password: "secret"
+  });
+
+  assert.equal(profile.dbType, "sqlserver");
+  assert.equal(store.list()[0].driverClass, "com.microsoft.sqlserver.jdbc.SQLServerDriver");
+});

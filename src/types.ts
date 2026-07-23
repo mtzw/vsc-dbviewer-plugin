@@ -1,4 +1,4 @@
-export type DatabaseType = "oracle" | "postgresql" | "mysql" | "h2" | "other";
+export type DatabaseType = "oracle" | "postgresql" | "mysql" | "sqlserver" | "h2" | "other";
 
 export interface ConnectionProfile {
   id: string;
@@ -45,6 +45,8 @@ export interface ColumnInfo {
   jdbcType: number | null;
   size: number | null;
   nullable: boolean;
+  autoIncrement: boolean;
+  generated: boolean;
   ordinal: number;
   defaultValue: string | null;
   remarks: string | null;
@@ -103,13 +105,34 @@ export interface ObjectDdl {
   message: string | null;
 }
 
+export interface InsertRowsRequest {
+  object: DbObject;
+  columns: string[];
+  rows: Array<Array<string | null>>;
+}
+
+export interface InsertRowsResult {
+  insertedRows: number;
+}
+
+export interface DeleteRowsResult {
+  deletedRows: number;
+}
+
+export interface UpdateRowsResult {
+  updatedRows: number;
+}
+
 export type HelperAction =
   | "testConnection"
   | "listSchemas"
   | "listTablesAndViews"
   | "getObjectInfo"
   | "getObjectData"
-  | "getObjectDdl";
+  | "getObjectDdl"
+  | "insertRows"
+  | "deleteRows"
+  | "updateRows";
 
 export interface HelperConnection {
   jdbcUrl: string;
@@ -127,6 +150,10 @@ export interface HelperRequest {
   where?: string;
   sortColumn?: string;
   sortDirection?: "ASC" | "DESC";
+  columns?: string[];
+  updateColumns?: string[];
+  primaryKeyColumns?: string[];
+  rows?: Array<Array<string | number | boolean | null>>;
 }
 
 export interface HelperResponse<T> {
