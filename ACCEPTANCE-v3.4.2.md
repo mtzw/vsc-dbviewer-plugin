@@ -11,7 +11,7 @@
 | H2 JDBC統合テスト | 成功 | H2 2.4.240で接続、メタデータ、取得、検索、ソート、ページング、Insert / Update / Delete / rollbackを確認 |
 | TypeScriptコンパイル | 成功 | `tsc -p .` |
 | クリーンビルド | 成功 | `npm run build`。Java helperを`--release 17`で生成 |
-| VSIX生成・内容検査 | 成功 | `vsc-dbviewer-plugin-3.4.2.vsix`。32ファイル、テスト・source map・Javaテストclassの混入なし。SHA-256: `d261c0ebe39b372ebc7c078e4d8ffa7c41e07912cf45f98218c5c54d539481ac` |
+| VSIX生成・内容検査 | 成功 | `vsc-dbviewer-plugin-3.4.2.vsix`。32ファイル、テスト・source map・Javaテストclassの混入なし。SHA-256: `f5935a672df01e4b83a49c721d3f6f84181beda4f9b06fb65c69219ed8d79774` |
 
 ## v3.4.2で追加した受入ケース
 

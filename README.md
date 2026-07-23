@@ -1,392 +1,188 @@
 # DB Viewer
 
-DB Viewer は、ユーザーが指定した JDBC ドライバーを使って RDB に接続する、VS Code / VS Code 互換エディタ向けのデータベースビューアです。基本は参照操作を中心とし、Tableに対するTSVペーストInsert、選択行削除、選択行Updateのみ限定的に書き込みに対応します。
+JDBCドライバーを利用して、Visual Studio Codeからリレーショナルデータベースを参照・操作するための拡張機能です。
 
-## v1 の範囲
+接続先のTable / Viewをツリーから開き、カラム・制約・インデックス・データ・定義SQLを確認できます。データの検索、ソート、コピー、ファイル出力に加え、Tableに限定したInsert / Update / Deleteとスナップショット差分にも対応しています。
 
-- JDBC 接続プロファイルの追加、編集、削除
-- 接続プロファイルの非秘密情報を VS Code `globalState` に保存
-- パスワードを VS Code `SecretStorage` に保存
-- DB Viewer の Activity Bar から接続ユーザーの Table / View をツリー表示
-- Table と View を `Tables` / `Views` フォルダに分けて表示
-- Table / View を Webview で開き、`情報`、`データ`、`定義SQL` タブを表示
-- `データ` タブは読み取り専用で、初期表示は最大 100 行
+## 主な機能
 
-v1 では、SQL / TSV コピー、TSV 貼り付け Insert、Java Entity / Record 生成は未実装です。
+### 接続管理
 
-## v1.1 の改善点
+- 接続プロファイルの作成、編集、複製、削除
+- 保存前の接続テスト
+- JDBCドライバーJARとサポートJARの複数指定
+- パスワードをVS Codeの`SecretStorage`へ保存
+- Table / Viewを接続ごとのツリーで表示
+- 接続、Tables、Views単位のRefresh
 
-- 接続作成 / 編集時に DB 種別を選択します。
-- JDBC ドライバーJARとサポートJARの選択ステップを分離しました。
-- Oracle を選択した場合は、`orai18n.jar` が必要になるケースを UI 上で案内します。
-- 保存前に、実際に classpath に追加されるJAR一覧を確認できます。
+### オブジェクト情報の確認
 
-## v2 の範囲
+Table / Viewを開くと、次のタブを利用できます。
 
-- データタブで行を選択できます。
-- 表示中の選択行を TSV としてコピーできます。
-- 表示中の選択行を `INSERT SQL` としてコピーできます。
-- データタブで末尾付近までスクロールすると追加ロードできます。
-- v2でも読み取り専用です。Insert、Update、Delete、任意SQL実行は行いません。
+| タブ | 内容 |
+| --- | --- |
+| 情報 | カラム名、型、サイズ、NULL可否、主キー、自動採番、自動生成、デフォルト値、備考 |
+| 制約 | 主キー、外部キー、Unique制約 |
+| インデックス | Index名、Unique、対象列、並び順、種別 |
+| データ | データ表示、検索、ソート、コピー、保存、Tableの限定的な書き込み操作 |
+| 差分 | Tableスナップショットの保存と比較 |
+| 定義SQL | JDBCメタデータから生成できる範囲のDDL |
 
-## v2.1 の改善点
+### データの参照と出力
 
-- 接続プロファイルの作成 / 編集UIをWebviewフォームに変更しました。
-- JDBCドライバーJARとサポートJARをフォーム上で一覧確認、削除、再選択できます。
-- フォーム上で接続テストを実行し、結果を確認できます。
-- 接続プロファイルを複製できます。
+- 初期表示は100行。スクロールによる追加ロード
+- SQLの`WHERE`句に相当する条件での絞り込み
+- カラムヘッダ選択による昇順・降順ソート
+- 選択行のTSV / INSERT SQLコピー
+- 検索・ソート条件を反映したCSV / TSV / INSERT SQL保存
+- 大量データ出力時の進捗表示とキャンセル
 
-## v2.2 の改善点
+`WHERE`条件には、接続先DBで有効な条件式だけを入力します。例: `status = 'ACTIVE'`。任意SQLを実行するSQLコンソール機能ではありません。
 
-- DB Viewerツリーで、接続ノードや `Tables` / `Views` フォルダ単位のRefreshを実行できます。
-- Table / View詳細に `制約`、`インデックス` タブを追加しました。
-- 主キー、外部キー、Unique、IndexなどのJDBCメタデータ表示を強化しました。
-- `INSERT SQLコピー` でOracleのDATE / TIMESTAMP / TIMESTAMP WITH TIME ZONE向けリテラル生成に対応しました。
+### Tableへの書き込み
 
-## v2.3 の改善点
+書き込み操作はTableだけが対象です。実行前に対象と変更内容をプレビューし、複数行を1トランザクションで処理します。途中で失敗した場合はロールバックします。Update / Deleteでは、処理件数が要求件数と一致しない場合もロールバックします。
 
-- データタブからTable / View全体をCSV / TSV / InsertSQL形式で保存できます。
-- エクスポートはページ単位でデータを取得し、VS Codeの進捗通知とキャンセルに対応します。
-- CSV / TSVはヘッダ行付きで保存します。
+- `Paste TSV Insert`
+  - 自動生成列を除いたTable列順でTSVをInsert
+  - 空欄は空文字、`\N`はNULL
+  - ダブルクォートで囲んだフィールド内のタブ、改行、`""`による引用符エスケープに対応
+  - JDBC型とNULL可否をプレビュー時に検証
+- `Update Selected`
+  - 主キーで一意に特定できる選択行を更新
+  - 主キー列と自動生成列は更新対象外
+  - DATE / TIME / TIMESTAMP向け入力UIと型検証を提供
+- `Delete Selected`
+  - 主キーで一意に特定できる選択行を削除
 
-## v2.4 の改善点
+Viewへの書き込み、主キーのないTableに対するUpdate / Delete、任意SQLの実行には対応していません。
 
-- データタブ上部の操作UIをグループ化し、コピー系と保存系の操作を整理しました。
-- 選択した行をハイライト表示します。
-- データリロード、where条件相当の簡易検索、ヘッダクリックによるソートに対応しました。
-- 検索条件とソート条件は、追加ロードとCSV / TSV / InsertSQL保存にも適用されます。
+### Tableスナップショット差分
 
-## v3.0 の改善点
+Tableの`差分`タブで変更前のスナップショットを保存し、現在のデータと比較できます。
 
-- `データ` タブから、TableにTSV形式のレコードをペーストしてInsertできます。
-- Insert前に、対象テーブル、行数、列、先頭行、NULL件数、検証エラーをプレビューします。
-- TSVはテーブル列順で解釈します。列数が一致しない行がある場合はInsertできません。
-- 空欄は空文字、`\N` はNULLとして扱います。
-- Insertは全行を1トランザクションで実行し、途中で失敗した場合は全体をロールバックします。
-- `Copy INSERT` / `Save INSERT` は従来通りSQL文字列の生成のみで、DBへの実行は行いません。
+- 行数と行順に依存しない内容フィンガープリントで変更を検出
+- 主キーがある場合は追加・削除・更新を行単位で分類
+- 更新行の変更列と変更前後の値を表示
+- Status、主キー、変更列によるフィルター
+- 50件単位のページ表示
+- 比較結果をJSON / CSVで保存
+- チャンク単位のSHA-256による破損検出
+- 保存、取得失敗、キャンセル時の不完全データ削除
 
-## v3.1 の改善点
+スナップショットの上限は1 Tableあたり5,000,000行または512 MiBです。行単位の詳細比較は、変更前・変更後がそれぞれ100,000行かつ128 MiB以内の場合に生成します。上限を超える場合は理由付きのサマリーを表示します。
 
-- `データ` タブで選択行を削除できます。
-- 削除対象は、主キーで一意に特定できるTableのみです。
-- 削除前に、対象テーブル、選択行数、主キー列、主キー値の先頭行をプレビューします。
-- 削除は全選択行を1トランザクションで実行し、途中で失敗した場合は全体をロールバックします。
-- 削除成功後は、現在の検索条件とソート条件を維持したままデータを再読み込みします。
+## 対応データベース
 
-## v3.2 の改善点
+接続画面には次のプリセットがあります。JDBCドライバーは拡張機能に同梱していません。利用するDBベンダーが提供するドライバーJARを別途用意してください。
 
-- `データ` タブで選択行を更新できます。
-- 更新対象は、主キーで一意に特定できるTableのみです。
-- 主キー列は更新対象外です。
-- 更新前に、対象テーブル、更新行数、主キー列、変更列、変更前/変更後の先頭行をプレビューします。
-- 更新は全選択行を1トランザクションで実行し、途中で失敗した場合は全体をロールバックします。
-- 更新成功後は、現在の検索条件とソート条件を維持したままデータを再読み込みします。
-- 同時更新検知はv3.2では主キー一致のみです。元値一致チェックは今後検討します。
+| DB | JDBC URL例 | ドライバークラス |
+| --- | --- | --- |
+| Oracle | `jdbc:oracle:thin:@//localhost:1521/FREEPDB1` | `oracle.jdbc.OracleDriver` |
+| PostgreSQL | `jdbc:postgresql://localhost:5432/postgres` | `org.postgresql.Driver` |
+| MySQL | `jdbc:mysql://localhost:3306/app` | `com.mysql.cj.jdbc.Driver` |
+| Microsoft SQL Server | `jdbc:sqlserver://localhost:1433;databaseName=database;encrypt=true` | `com.microsoft.sqlserver.jdbc.SQLServerDriver` |
+| H2 | `jdbc:h2:mem:test` | `org.h2.Driver` |
+| Other | `jdbc:vendor://host:port/database` | 使用するドライバーに従って指定 |
 
-## v3.2.1 の改善点
+DB固有の型、DDL、SQLリテラルはJDBCメタデータを基準にベストエフォートで処理します。OracleのDATE / TIMESTAMP系と、Microsoft SQL Serverの主要な型・識別子・リテラル・ページングには個別対応しています。
 
-- Insert / UpdateのPreview時に、JDBC型情報に基づく入力値チェックを行います。
-- 数値、真偽値、日付、時刻、タイムスタンプ、NULL可否をPreview時に検証します。
-- Update画面では、DATE列にカレンダー入力、TIME列に時刻入力、TIMESTAMP列に日時入力を使用します。
-- TIMESTAMP WITH TIME ZONEなどDB固有性が高い型は、v3.2.1では文字列入力のままとします。
+## 必要な環境
 
-## v3.2.2 の改善点
+- Visual Studio Code 1.90.0以上
+- Java 17以上
+- 接続先DBに対応したJDBCドライバーJAR
+- DBへ接続できるネットワークと認証情報
 
-- Java helperをJava 17向けに固定してビルドし、配布先のJDK差異による起動失敗を防ぎます。
-- 主キーまたはUnique Indexを優先してデータ取得順を安定させ、追加ロードと全件エクスポートの重複・欠落を抑制します。
-- Identity、generated、computedなどの自動生成列をメタデータから判定します。
-- 自動生成列はTSV Insertと行Updateの入力対象から除外し、Java helperでも書き込みを拒否します。
-- BINARY / BLOBはBase64、CLOB / SQLXMLは文字列、UUIDは文字列表現へ正規化します。
-- Update / Deleteの要求件数と実行件数が一致しない場合は、処理全体をロールバックします。
-- ビルド前に以前の生成物を削除し、配布VSIXからテストコード、source map、Javaテストclassなどの不要物を除外します。
-
-## ロードマップ
-
-### v3.3 Microsoft SQL Server対応
-
-実装済み:
-
-- 接続プロファイルへMicrosoft SQL Serverを追加しました。
-- JDBCドライバークラスの既定値は`com.microsoft.sqlserver.jdbc.SQLServerDriver`、JDBC URL例は`jdbc:sqlserver://localhost:1433;databaseName=database;encrypt=true`です。
-- SQL Serverの識別子引用、`OFFSET ... FETCH`ページング、Insert SQLリテラルを方言として分離しました。
-- Insert SQLではbitを`1` / `0`、NCHAR / NVARCHAR / NTEXTを`N'...'`、Base64形式のバイナリを`0x...`として生成します。
-- `datetime2`、`datetimeoffset`、`money`、`uniqueidentifier`、`bit`、`nvarchar(max)`、`varbinary(max)`の表示・入力経路を追加しました。
-- SQL Serverの`timestamp` / `rowversion`は日時型ではなく自動生成列として扱います。
-- 利用者環境で接続、表示、書き込みを含む一通りの実機スモークテストを実施し、問題がないことを確認済みです。
-- 一時SQL Server 2022コンテナを使用し、メタデータ、固有型、ページング、Insert、Update、Delete、rollbackを自動検証します。
-
-### v3.4 テーブル差分MVP
-
-実装済み:
-
-- Table詳細の`差分`タブから変更前のスナップショットを保存し、変更後の再取得結果と比較できます。
-- 行順に依存しない内容フィンガープリントと件数を比較するため、行数が変わらないUpdateも変更として検出します。
-- 主キーを取得できるTableでは、追加、削除、更新を行単位で分類し、更新行は変更列を表示します。
-- 主キーを取得できないTableでは、件数と内容変更のみを検出します。列または主キー構成が変わった場合も、行単位分類を行いません。
-- 比較結果のサマリーと行差分をJSON / CSV形式で保存できます。
-- スナップショットはVS Codeの拡張用保存領域に保存し、画面から削除できます。30日を超えたデータはTable詳細を開いた際に自動削除します。
-- BLOB、CLOB、SQLXML、バイナリ型などはスナップショットから除外します。MVPでは1 Tableあたり100,000行を上限とします。
-
-スナップショットにはLOB / バイナリ以外のTableデータが暗号化されず保存されます。機微情報を含むTableで使用する場合は、利用端末とVS Codeの拡張用保存領域のアクセス管理を確認してください。v3.4.0形式の既存スナップショットは互換読込時に全行をメモリへ展開します。新規取得時の大規模Table対応と取得整合性の扱いはv3.4.1を参照してください。
-
-### v3.4.1 大規模データ対応
-
-実装済み:
-
-- JDBCのページ取得結果を1,000行単位のチャンクとして順次保存し、取得全体をメモリへ保持しない方式へ変更しました。v3.4形式の既存スナップショットも引き続き読み込めます。
-- チャンクごとにSHA-256整合性ハッシュを保存し、全体は行順とチャンク境界に依存しない内容フィンガープリントで比較します。
-- 進捗通知へ取得行数、保存容量、チャンク数を表示します。キャンセル、容量超過、取得失敗時は不完全なチャンクを削除します。異常終了で残った取得中データと比較用一時データは24時間後に削除します。
-- 1 Tableあたり5,000,000行または512 MiBをスナップショット上限とします。
-- フィンガープリントが同一の場合と主キーがない場合は、保存チャンクを全行展開せずサマリーを判定します。
-- 主キー単位の行詳細は、変更前と変更後がそれぞれ100,000行、128 MiB以内の場合に生成します。超過時は件数と内容フィンガープリントのサマリーへ切り替え、JSON / CSVにも理由を記録します。
-- 行差分は50件単位でページ表示し、先頭50件以降も画面上で確認できます。
-- Status、主キー、変更列で行差分を絞り込めます。主キーと変更列は大文字・小文字を区別しない部分一致です。
-- 各行の`Details`から列単位の変更前後を省略せず確認でき、変更対象列を強調表示します。
-- 複数ページ取得、キャンセル、行数・容量上限、取得中の列構成変更、チャンク破損、比較詳細上限を自動テストで確認します。
-
-現在の取得整合性は、Oracle、PostgreSQL、MySQL、Microsoft SQL Server、H2のすべてで`best-effort`です。ページごとに独立したJDBC要求を使用するため、取得中にTableが更新されると複数時点のデータが混在する可能性があります。再開についても、前回offsetからの継続は同じ理由で重複・欠落を招くため実装していません。キャンセルまたは失敗後は先頭から再取得します。DB別の一貫性トランザクションと、安全な再開方式は今後の拡張候補です。
-
-### v3.4.2 差分機能の安定化
-
-- 未変更、主キーなし、詳細上限超過などのサマリー比較でも、全チャンクを一括展開せずにSHA-256、行形式、全体フィンガープリントを検証します。
-- 欠損チャンク、破損チャンク、不正マニフェスト、保存先と一致しないIDを検出し、原因をエラーに表示します。
-- v3.4単一ファイル形式とv3.4.1チャンク形式の相互比較・削除を維持し、単一ファイルにも128 MiBの詳細比較上限を適用します。
-- LOB / バイナリ列だけが追加・削除された場合も構成変更として検出します。主キーにLOB / バイナリ列が含まれる場合も当該データを保存せず、行分類を無効にしてサマリー比較へ切り替えます。
-- ページ取得が進行しない、offsetや行・列数が不正などの異常応答を検出し、不完全な取得データを削除します。
-- 複数のTableパネルから同時に保存・削除しても索引更新が失われないよう、保存領域単位で更新を直列化します。
-- 保存・比較・削除・30日保持、行分類、構成変更、LOB除外、JSON / CSV、複数チャンク、各種上限、キャンセル、50件ページング、フィルター、行詳細、旧形式互換、破損復旧を自動テストで回帰確認します。
-
-検証環境と実施結果は[ACCEPTANCE-v3.4.2.md](ACCEPTANCE-v3.4.2.md)に記録します。実DB確認は、H2の自動統合テストを基準とし、Microsoft SQL Server、Oracle、PostgreSQL、MySQLの利用可能な環境から順に継続します。
-
-複数Tableの一括差分比較は、DB負荷、Table間整合性、総保存容量の制御が必要なため、現時点では実装せず今後の検討候補とします。
-
-Java Entity / Record生成は現行ロードマップ外の候補です。v3.4.2の差分機能安定化を優先し、実装時期は定めていません。
-
-## 開発手順
+Java helperの起動に`java`コマンドを使用します。VS Codeを起動する環境の`PATH`からJava 17以上を実行できることを確認してください。
 
 ```sh
-npm install
-npm run build
+java -version
 ```
 
-ソースからビルドする場合は、Node.js / npmに加えてJDK 17以上が必要です。Java helperは`javac --release 17`でビルドされ、実行環境にもJava 17以上が必要です。
+## インストール
 
-テストを実行する場合:
-
-```sh
-npm test
-```
-
-`npm test` は TypeScript 側の単体テストを実行します。H2 JDBC ドライバーの JAR を指定した場合は、Java ヘルパーの H2 統合テストも実行します。
-
-```sh
-H2_JAR=/path/to/h2.jar npm test
-```
-
-SQL Server統合テストを実行する場合:
-
-```sh
-MSSQL_JDBC_JAR=/path/to/mssql-jdbc-*.jre11.jar npm run test:sqlserver
-```
-
-Dockerで一時SQL Server 2022 Developerコンテナを起動し、空きポートへ接続してテスト後に削除します。`MSSQL_DOCKER_IMAGE`でイメージを変更できます。既存SQL Serverを使用する場合は、`MSSQL_JDBC_URL`、`MSSQL_USERNAME`、`MSSQL_PASSWORD`を指定してください。対象DB内にプロセス固有の`dbviewer_it_*` schemaを一時作成し、終了時に削除します。
-
-## VSIX作成手順
-
-メンバー間で配布する場合は、VS Code拡張のパッケージファイルである `.vsix` を作成します。
-
-1. 依存関係をインストールします。
-
-```sh
-npm install
-```
-
-2. 拡張本体と Java ヘルパーをビルドします。
-
-```sh
-npm run build
-```
-
-3. テストを実行します。
-
-```sh
-npm test
-```
-
-4. VSIXを作成します。
-
-```sh
-npm run package:vsix
-```
-
-作成に成功すると、プロジェクト直下に次のようなファイルが生成されます。
-
-```text
-vsc-dbviewer-plugin-{version}.vsix
-```
-
-バージョン番号は `package.json` の `version` に従います。配布前にバージョンを上げる場合は、`package.json` を更新してから `npm install --package-lock-only` を実行し、`package-lock.json` も同期してください。
-
-## VSIXインストール手順
-
-配布されたVSIXは、各メンバーの環境で以下の方法でインストールできます。
+VS CodeのExtensionsビューで`DB Viewer`を検索し、`Install`を選択します。
 
 コマンドラインからインストールする場合:
 
 ```sh
-VSIX_PATH=/path/to/vsc-dbviewer-plugin-x.y.z.vsix
-code --install-extension "$VSIX_PATH"
+code --install-extension mtzw.vsc-dbviewer-plugin
 ```
 
-VS Code の画面からインストールする場合:
+## はじめに
 
-1. Extensionsビューを開きます。
-2. 右上の `...` メニューを開きます。
-3. `Install from VSIX...` を選択します。
-4. 配布された `.vsix` ファイルを選択します。
+1. 利用するDBのJDBCドライバーJARを用意します。
+2. Activity Barから`DB Viewer`を開きます。
+3. Connectionsビューの`Add Connection`を選択します。
+4. 接続名、DB種別、JDBC URL、ドライバークラス、JAR、ユーザー名、パスワードを入力します。
+5. `接続テスト`で接続を確認してから保存します。
+6. 接続ノードを展開し、`Tables`または`Views`から対象を開きます。
 
-更新版を配布する場合は、`package.json` の `version` を上げてからVSIXを作成してください。同じバージョン番号のまま配布すると、利用者側で更新されたか分かりにくくなります。
+DB側でTable / Viewを追加または削除した場合は、ConnectionsビューのRefreshを実行してください。
 
-## 動作確認手順
+## セキュリティとデータの取り扱い
 
-1. 依存関係をインストールし、拡張本体と Java ヘルパーをビルドします。
+- パスワードはVS Codeの`SecretStorage`へ保存します。
+- 接続名、JDBC URL、ユーザー名、JARパスなどの非秘密情報はVS Codeの拡張用状態へ保存します。
+- JDBCドライバーは利用者が選択したローカルJARをJava helperのclasspathへ追加して実行します。信頼できる配布元から取得したJARだけを指定してください。
+- 書き込み操作は、接続ユーザーに付与されたDB権限で実行されます。参照用途では読み取り専用ユーザーの利用を推奨します。
+- 検索条件は接続先DBへSQL条件式として渡されます。信頼できない文字列をそのまま入力しないでください。
+- スナップショットにはLOB / バイナリ列を除くTableデータが暗号化されずに保存されます。機微情報を含むTableで使用する場合は、端末とVS Codeの拡張用保存領域を適切に保護してください。
+- スナップショットは30日を超えるとTable詳細を開いた際に削除されます。画面から手動削除することもできます。
+
+LOB / バイナリ列が主キーに含まれる場合、その値もスナップショットへ保存しません。この場合は完全な主キーを構成できないため、行単位分類ではなくサマリー比較になります。
+
+## 制限事項
+
+- SQLコンソールや任意SQL実行機能はありません。
+- Viewは参照とエクスポートのみです。
+- Table / View一覧は接続ユーザーの現在スキーマを対象とします。
+- DDL生成はJDBCメタデータで取得できる範囲のベストエフォートです。DB上の定義を完全には再現しない場合があります。
+- 主キーとUnique Indexのどちらも取得できないTable / Viewでは、ページングと全件出力の一意な取得順を保証できません。
+- Updateの競合検知は主キー一致のみです。表示後に別の利用者が同じ行を更新した場合、後から実行したUpdateで値を上書きする可能性があります。
+- TIMESTAMP WITH TIME ZONEなどDB固有性が高い型は、専用入力UIではなく文字列入力になる場合があります。
+- エクスポートをキャンセルすると、途中まで出力されたファイルが残ります。
+- スナップショット取得はページごとに独立した要求を使う`best-effort`方式です。取得中にTableが更新されると、複数時点のデータが混在する可能性があります。
+
+## トラブルシューティング
+
+### Java helperを起動できない
+
+`java -version`を実行し、Java 17以上が`PATH`から利用できることを確認してください。VS Codeを起動した後に`PATH`を変更した場合は、VS Codeを再起動します。
+
+### JDBCドライバーを読み込めない
+
+接続編集画面で、JDBCドライバーJARとドライバークラス名が一致していることを確認してください。ドライバーが依存する追加JARは`サポートJAR`へ指定します。
+
+### Oracleで`ORA-17056`が表示される
+
+利用している`ojdbc*.jar`に対応する`orai18n.jar`を用意し、接続編集画面の`サポートJAR`へ追加してください。
+
+### SQL Serverへ暗号化接続できない
+
+接続先の証明書構成とJDBC URLの`encrypt`、`trustServerCertificate`などの設定を確認してください。本番環境ではDB管理者の方針に従って証明書を検証してください。
+
+## フィードバック
+
+不具合報告や機能要望は[GitHub Issues](https://github.com/mtzw/vsc-dbviewer-plugin/issues)へお願いします。報告には、DB種別、Javaのバージョン、JDBCドライバーのバージョン、再現手順、表示されたエラーを含めてください。パスワード、接続文字列、Tableデータなどの機密情報は記載しないでください。
+
+## ライセンス
+
+[MIT License](LICENSE.md)
+
+## 開発者向け
+
+ソースからビルドする場合は、Node.js / npmとJDK 17以上が必要です。
 
 ```sh
 npm install
 npm run build
+npm test
 ```
 
-2. VS Code でこのディレクトリを開きます。
+H2 JDBC統合テストを含める場合:
 
 ```sh
-code .
+H2_JAR=/path/to/h2.jar npm test
 ```
-
-3. `Run and Debug` から `Extension Development Host` を起動します。
-
-起動構成が無い場合は、VS Code の拡張開発用デバッグ構成を追加してから実行してください。
-
-4. Extension Development Host 側で Activity Bar の `DB Viewer` を開きます。
-
-5. `Add Connection` を実行し、接続情報を入力します。
-
-入力項目:
-
-- 接続名
-- DB 種別
-- JDBC URL
-- JDBC ドライバークラス
-- JDBC ドライバーJAR
-- サポートJAR
-- ユーザー名
-- パスワード
-
-接続プロファイル画面では、入力内容を保存する前に `接続テスト` を実行できます。既存プロファイルを編集する場合、パスワード欄を空のまま保存すると既存パスワードを維持します。
-
-PostgreSQL の入力例:
-
-- JDBC URL: `jdbc:postgresql://localhost:5432/postgres`
-- JDBC ドライバークラス: `org.postgresql.Driver`
-- JDBC ドライバー JAR: `postgresql-*.jar`
-
-Oracle の入力例:
-
-- JDBC URL: `jdbc:oracle:thin:@//localhost:1521/FREEPDB1`
-- JDBC ドライバークラス: `oracle.jdbc.OracleDriver`
-- JDBC ドライバーJAR: `ojdbc*.jar`
-- サポートJAR: 文字セット対応が必要な場合は `orai18n.jar`
-
-H2 の入力例:
-
-- JDBC URL: `jdbc:h2:mem:test`
-- JDBC ドライバークラス: `org.h2.Driver`
-- JDBC ドライバー JAR: `h2-*.jar`
-
-Microsoft SQL Server の入力例:
-
-- JDBC URL: `jdbc:sqlserver://localhost:1433;databaseName=database;encrypt=true`
-- JDBC ドライバークラス: `com.microsoft.sqlserver.jdbc.SQLServerDriver`
-- JDBC ドライバーJAR: `mssql-jdbc-*.jre11.jar`
-- JDBCドライバーは同梱していないため、Microsoft JDBC Driver for SQL Serverを別途用意してください。
-- 公式資料: [Using the JDBC driver](https://learn.microsoft.com/en-us/sql/connect/jdbc/using-the-jdbc-driver)、[Using basic JDBC data types](https://learn.microsoft.com/en-us/sql/connect/jdbc/using-basic-data-types)
-
-6. 接続保存後、必要に応じて `Test Connection` を実行します。
-
-7. DB Viewer のツリーを展開し、`Tables` または `Views` 配下の Table / View を選択します。
-
-8. Table / View を開き、Webview 上で以下を確認します。
-
-- `情報`: カラム、型、Nullable、主キー、自動採番、自動生成、デフォルト値、備考
-- `制約`: 主キー、外部キー、Unique制約
-- `インデックス`: Index名、Unique、列、並び順、種別
-- `データ`: 初期表示は最大100行で、末尾付近までスクロールすると追加ロードします。Tableでは限定的なInsert / Update / Deleteも利用できます。
-- `定義SQL`: JDBC メタデータから生成できる範囲の定義SQL、または取得できない場合の補足メッセージ
-
-データタブでは、行チェックボックスを選択して以下の操作ができます。
-
-- `Reload`
-- where条件相当の検索
-- ヘッダクリックによるソート
-- `全選択`
-- `選択解除`
-- `TSVコピー`
-- `INSERT SQLコピー`
-- `CSV保存`
-- `TSV保存`
-- `INSERT SQL保存`
-- `Paste TSV Insert`（Tableのみ）
-- `Update Selected`（主キーを取得できるTableのみ）
-- `Delete Selected`（主キーを取得できるTableのみ）
-- 末尾付近までスクロールした際の追加ロード
-
-`Paste TSV Insert` の確認手順:
-
-1. Tableの `データ` タブで `Paste TSV Insert` を押します。
-2. 情報タブの列順から自動生成列を除いた、書き込み可能な列順のTSVを貼り付けます。
-   - タブや改行を含む値はダブルクォートで囲み、値中のダブルクォートは`""`と記述します。
-3. `Preview` を押し、対象テーブル、行数、列、先頭行、NULL件数、型やNULL可否の検証エラーを確認します。
-4. エラーが無い場合だけ `Insert` を押して投入します。
-5. 成功後、現在の検索条件とソート条件を維持したままデータが再読み込みされます。
-
-`Delete Selected` の確認手順:
-
-1. Tableの `データ` タブで削除したい行を選択します。
-2. `Delete Selected` を押します。
-3. 対象テーブル、選択行数、主キー列、主キー値を確認します。
-4. エラーが無い場合だけ `Delete` を押して削除します。
-5. 成功後、現在の検索条件とソート条件を維持したままデータが再読み込みされます。
-
-`Update Selected` の確認手順:
-
-1. Tableの `データ` タブで更新したい行を選択します。
-2. `Update Selected` を押します。
-3. 主キーと自動生成列以外の列を編集します。DATE / TIME / TIMESTAMP列は日付・時刻入力を使用できます。NULLにする場合、日付・時刻入力は空欄、文字列入力は `\N` を入力します。
-4. `Preview` を押し、対象テーブル、更新行数、主キー列、変更列、変更前/変更後、型やNULL可否の検証エラーを確認します。
-5. エラーが無い場合だけ `Update` を押して更新します。
-6. 成功後、現在の検索条件とソート条件を維持したままデータが再読み込みされます。
-
-## 注意事項
-
-- JDBC ドライバーは同梱していません。利用する DB の JDBC ドライバー JAR を事前に用意してください。
-- Java helperの実行にはJava 17以上が必要です。
-- Oracle で `ORA-17056` が発生する場合は、接続編集で `ojdbc*.jar` に加えて `orai18n.jar` をサポートJARとして指定してください。
-- Table / View 一覧は、接続ユーザーの現在スキーマを対象に表示します。Oracle では通常、接続ユーザー所有の Table / View が対象です。
-- Java 実行環境が必要です。`java` コマンドが PATH から実行できる状態にしてください。
-- View の定義SQLは汎用 JDBC メタデータだけでは取得できないため、v1 では補足メッセージを表示します。
-- DB ごとの厳密な DDL 取得は v1 ではベストエフォートです。
-- `INSERT SQLコピー` はクリップボードへ文字列をコピーするだけです。DBへの書き込みは行いません。
-- `INSERT SQLコピー` の日付/時刻リテラルのRDB方言対応はベストエフォートです。OracleのDATE/TIMESTAMP向けリテラル生成はJDBC型情報に基づいて行います。
-- `INSERT SQL保存` はSQL文字列をファイルへ保存するだけです。Viewを対象にした場合、そのSQLがDBで実行可能であることは保証しません。
-- TSV InsertはTableのみ対象です。View、任意SQL実行には対応していません。
-- TSV Insertはヘッダ行を解釈しません。情報タブの列順から自動生成列を除いた、書き込み可能な列順で値を貼り付けてください。
-- TSV Insertでは、空欄は空文字、`\N`はNULLとして扱います。フィールドをダブルクォートで囲むとタブや改行を値に含められ、値中のダブルクォートは`""`でエスケープできます。
-- Insert / Updateの型チェックは、Java helperの型変換で受け付ける標準形式に合わせたPreview時の簡易検証です。
-- 選択行削除は、主キーを取得できるTableのみ対象です。Viewや主キーが無いTableでは実行できません。
-- 行Updateは、主キーを取得できるTableのみ対象です。主キー列、自動生成列の更新とView更新には対応していません。
-- TIMESTAMP WITH TIME ZONEなどDB固有性が高い日付時刻型は、v3.2.1では専用入力UIの対象外です。
-- 行Updateの同時更新検知はv3.2では主キー一致のみです。表示後に別ユーザーが同じ行を更新した場合、後から実行したUpdateで値を上書きする可能性があります。
-- データタブの検索条件はSQLのwhere句相当の条件式として扱います。セミコロンを含む条件式は指定できません。
-- 大量データのエクスポートは時間がかかる場合があります。キャンセルした場合、途中まで出力されたファイルが残ります。
-- 主キーとUnique Indexのどちらも取得できないTable / Viewでは、一意な並び順を決定できないため追加ロードや全件エクスポートの取得順を保証できません。
-- 自動テストはTypeScript単体テスト、Java方言テスト、H2統合テスト、SQL Server 2022統合テストで構成します。Oracle、PostgreSQL、MySQLの実DB統合テストは未整備です。
-- DB側でTable / Viewを追加、削除した場合は、DB ViewerのRefreshを実行してツリーを更新してください。
